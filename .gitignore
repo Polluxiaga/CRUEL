@@ -1,0 +1,15 @@
+my_logs/*
+wandb/*
+my_scand/*
+my_scand_splits/*
+
+.vscode/*
+*/.vscode/*
+
+*.png
+*.jpg
+*.pth
+*.mp4
+*.gif
+
+__pycache__/
