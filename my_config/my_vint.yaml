@@ -1,10 +1,8 @@
 project_name: my_vint
 run_name: vint
-load_run: "my_vint/vint_2025_02_23_14_34_09"
-run_id: "y0f6x1wi"
 
 # training setup
-method: "BC"
+method: "GOAL"
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
 batch_size: 256
