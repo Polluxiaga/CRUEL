@@ -20,7 +20,7 @@ from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 def main(config):
 
-    torch.set_num_threads(4)
+    torch.set_num_threads(12)
     
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -251,6 +251,7 @@ def main(config):
 
 
     print("FINISHED TRAINING")
+    wandb.finish()
 
 
 if __name__ == "__main__":

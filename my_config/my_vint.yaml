@@ -1,5 +1,7 @@
 project_name: my_vint
 run_name: vint
+load_run: "my_vint/vint_2025_02_24_17_32_34"
+run_id: "itorha5l"
 
 # training setup
 method: "GOAL"
