@@ -21,8 +21,7 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         # Add the positional encoding to the input based on the seq_len
-        seq_len = x.size(1)
-        x = x + self.pos_enc[:, :seq_len, :]
+        x = x + self.pos_enc[:, :x.size(1), :]
         return x
     
 
@@ -84,8 +83,8 @@ class MultiLayerDecoder_GOAL(nn.Module):
         x1, x2 = x[:, :6, :], x[:, 6:, :]  # assuming first 6 tokens and next 3 tokens
         
         # Apply positional encoding for each part
-        x1 = self.positional_encoding_1(x1, seq_len=6)
-        x2 = self.positional_encoding_2(x2, seq_len=3)
+        x1 = self.positional_encoding_1(x1)
+        x2 = self.positional_encoding_2(x2)
 
         # Concatenate both parts back together
         x = torch.cat([x1, x2], dim=1)
