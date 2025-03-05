@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import torch
 from PIL import Image
 import matplotlib.pyplot as plt
 import cv2 # type: ignore
@@ -30,6 +31,8 @@ def visualize_traj_pred_BC(
     batch_obs_images: np.ndarray,
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
+    obs_features: np.ndarray,
+    obs_features_grads: np.ndarray,
     eval_type: str,
     normalized: bool,
     save_folder: str,
@@ -47,6 +50,7 @@ def visualize_traj_pred_BC(
         dataset_names: indices corresponding to the dataset name
         batch_pred_waypoints (np.ndarray): batch of predicted waypoints [batch_size, learn_traj_pred, 2]
         batch_label_waypoints (np.ndarray): batch of label waypoints [batch_size, learn_traj_pred, 2]
+        obs_features (np.ndarray): batch of observation features [batch_size*(context_size+1), num_features, height, width]
         eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
         normalized (bool): whether the waypoints are normalized
         save_folder (str): folder to save the images. If None, will not save the images
@@ -80,6 +84,8 @@ def visualize_traj_pred_BC(
         obs_img = np2img(batch_obs_images[i])
         pred_waypoints = batch_pred_waypoints[i]
         label_waypoints = batch_label_waypoints[i]
+        obs_feature = obs_features[i]
+        obs_feature_grad = obs_features_grads[i]
 
         if normalized:
             pred_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
@@ -94,6 +100,8 @@ def visualize_traj_pred_BC(
             dataset_name,
             pred_waypoints,
             label_waypoints,
+            obs_feature,
+            obs_feature_grad,
             save_path,
             display,
         )
@@ -108,6 +116,8 @@ def visualize_traj_pred_GOAL(
     batch_goal_images: np.ndarray,
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
+    obs_features: np.ndarray,
+    obs_features_grads: np.ndarray,
     eval_type: str,
     normalized: bool,
     save_folder: str,
@@ -125,6 +135,7 @@ def visualize_traj_pred_GOAL(
         dataset_names: indices corresponding to the dataset name
         batch_pred_waypoints (np.ndarray): batch of predicted waypoints [batch_size, learn_traj_pred, 2]
         batch_label_waypoints (np.ndarray): batch of label waypoints [batch_size, learn_traj_pred, 2]
+        obs_features (np.ndarray): batch of observation features [batch_size*(context_size+1+learn_traj_pred), num_features, height, width]
         eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
         normalized (bool): whether the waypoints are normalized
         save_folder (str): folder to save the images. If None, will not save the images
@@ -160,6 +171,8 @@ def visualize_traj_pred_GOAL(
         goal_img = np2img(batch_goal_images[i])
         pred_waypoints = batch_pred_waypoints[i]
         label_waypoints = batch_label_waypoints[i]
+        obs_feature = obs_features[i]
+        obs_feature_grad = obs_features_grads[i]
 
         if normalized:
             pred_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
@@ -175,6 +188,8 @@ def visualize_traj_pred_GOAL(
             dataset_name,
             pred_waypoints,
             label_waypoints,
+            obs_feature,
+            obs_feature_grad,
             save_path,
             display,
         )
@@ -189,50 +204,65 @@ def compare_waypoints_pred_to_label_BC(
     dataset_name: str,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
+    obs_feature: np.ndarray,
+    obs_feature_grad: Optional[np.ndarray],
     save_path: Optional[str] = None,
     display: Optional[bool] = False,
 ):
     """
-    Compare predicted path with the gt path of waypoints using egocentric visualization.
+    使用Grad-CAM加权特征生成热力图，并与观测图叠加，同时绘制预测轨迹和标注轨迹.
 
     Args:
-        obs_img: image of the observation
-        goal_img: image of the goal
-        dataset_name: name of the dataset found in data_config.yaml (e.g. "recon")
-        pred_waypoints: predicted waypoints in the image
-        label_waypoints: label waypoints in the image
-        save_path: path to save the figure
-        display: whether to display the figure
+        obs_img: PIL Image格式的观测图
+        dataset_name: 数据集名称
+        pred_waypoints: 预测轨迹，形状 [N,2]
+        label_waypoints: 标注轨迹，形状 [N,2]
+        obs_feature: 观测图对应的特征图 (C, H, W)
+        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
+        save_path: 保存图像的路径
+        display: 是否显示图像
     """
+    features = (
+        obs_feature
+        if isinstance(obs_feature, np.ndarray)
+        else obs_feature.detach().cpu().numpy()
+    )
+    
+    if obs_feature_grad is not None:
+        grads = (
+            obs_feature_grad
+            if isinstance(obs_feature_grad, np.ndarray)
+            else obs_feature_grad.detach().cpu().numpy()
+        )
+    else:
+        print("未能获取有效梯度信息，采用简单平均作为热力图。")
+        grads = np.ones_like(features)
 
-    fig, ax = plt.subplots(1, 2)
-    trajs = [pred_waypoints, label_waypoints]
+    # 计算Grad-CAM热力图 (H, W)
+    cam = compute_gradcam_heatmap(features, grads)
+    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+    # 叠加热力图到观测图
+    obs_img_np = np.array(obs_img)
+    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
+
+    # 绘制预测轨迹和标注轨迹
+    fig, ax = plt.subplots(1, 2, figsize=(18.5, 10.5))
+
     plot_trajs_and_points(
         ax[0],
-        trajs,
+        [pred_waypoints, label_waypoints],
         traj_colors=[CYAN, MAGENTA],
     )
-    """
-    plot_trajs_and_points_on_image(
-        ax[1],
-        obs_img,
-        dataset_name,
-        trajs,
-        traj_colors=[CYAN, MAGENTA],
-    )
-    """
-    ax[1].imshow(obs_img)
+    ax[0].set_title("Action Prediction")
 
-    fig.set_size_inches(18.5, 10.5)
-    ax[0].set_title(f"Action Prediction")
-    """ax[1].set_title(f"Observation")"""
-    ax[1].set_title(f"Current")
+    ax[1].imshow(heatmap_img)
+    ax[1].set_title("Current with Grad-CAM")
 
     if save_path is not None:
-        fig.savefig(
-            save_path,
-            bbox_inches="tight",
-        )
+        fig.savefig(save_path, bbox_inches="tight")
 
     if not display:
         plt.close(fig)
@@ -244,50 +274,66 @@ def compare_waypoints_pred_to_label_GOAL(
     dataset_name: str,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
+    obs_feature: np.ndarray,
+    obs_feature_grad: Optional[np.ndarray],
     save_path: Optional[str] = None,
     display: Optional[bool] = False,
 ):
     """
-    Compare predicted path with the gt path of waypoints using egocentric visualization.
+    使用Grad-CAM生成热力图，并显示当前观测图和目标图，同时绘制预测轨迹和标注轨迹.
 
     Args:
-        obs_img: image of the observation
-        goal_img: image of the goal
-        dataset_name: name of the dataset found in data_config.yaml (e.g. "recon")
-        pred_waypoints: predicted waypoints in the image
-        label_waypoints: label waypoints in the image
-        save_path: path to save the figure
-        display: whether to display the figure
+        obs_img: 观测图 (PIL Image)
+        goal_img: 目标图 (PIL Image)
+        dataset_name: 数据集名称
+        pred_waypoints: 预测轨迹 [N, 2]
+        label_waypoints: 标注轨迹 [N, 2]
+        obs_feature: 观测图特征图 (C, H, W)
+        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
+        save_path: 保存图像的路径
+        display: 是否显示图像
     """
+    features = (
+        obs_feature
+        if isinstance(obs_feature, np.ndarray)
+        else obs_feature.detach().cpu().numpy()
+        )
+    
+    if obs_feature_grad is not None:
+        grads = (
+            obs_feature_grad
+            if isinstance(obs_feature_grad, np.ndarray)
+            else obs_feature_grad.detach().cpu().numpy()
+        )
+    else:
+        print(f"未能获取有效梯度信息，采用简单平均作为热力图。")
+        grads = np.ones_like(features)
 
-    fig, ax = plt.subplots(1, 2)
-    trajs = [pred_waypoints, label_waypoints]
+    # 计算Grad-CAM热力图 (H, W)
+    cam = compute_gradcam_heatmap(features, grads)
+    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+    # 叠加热力图到观测图
+    obs_img_np = np.array(obs_img)
+    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
+
+    # 绘制预测轨迹和标注轨迹，并显示目标图
+    fig, ax = plt.subplots(1, 2, figsize=(18.5, 10.5))
+
     plot_trajs_and_points(
         ax[0],
-        trajs,
+        [pred_waypoints, label_waypoints],
         traj_colors=[CYAN, MAGENTA],
     )
-    """
-    plot_trajs_and_points_on_image(
-        ax[1],
-        obs_img,
-        dataset_name,
-        trajs,
-        traj_colors=[CYAN, MAGENTA],
-    )
-    """
-    ax[1].imshow(goal_img)
+    ax[0].set_title("Action Prediction")
 
-    fig.set_size_inches(18.5, 10.5)
-    ax[0].set_title(f"Action Prediction")
-    """ax[1].set_title(f"Observation")"""
-    ax[1].set_title(f"Goal")
+    ax[1].imshow(heatmap_img)
+    ax[1].set_title("Current with Grad-CAM")
 
     if save_path is not None:
-        fig.savefig(
-            save_path,
-            bbox_inches="tight",
-        )
+        fig.savefig(save_path, bbox_inches="tight")
 
     if not display:
         plt.close(fig)
@@ -334,6 +380,25 @@ def plot_trajs_and_points(
     # put the legend below the plot
     if traj_labels is not None or point_labels is not None:
         ax.legend(bbox_to_anchor=(0.0, -0.5), loc="upper left", ncol=2)
+
+
+def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarray:
+    """
+    根据特征图和梯度计算Grad-CAM热力图。
+    Args:
+        features: 形状为 (C, H, W) 的特征图
+        grads: 与features形状相同的梯度
+    Returns:
+        热力图，范围 [0, 1]
+    """
+    # 对每个通道计算梯度均值作为权重
+    weights = np.mean(grads, axis=(1, 2), keepdims=True)  # shape: (C, 1, 1)
+    cam = np.sum(weights * features, axis=0)  # 聚合特征图，shape: (H, W)
+    # 仅保留正值，并归一化
+    cam = np.maximum(cam, 0)
+    if np.max(cam) != 0:
+        cam = cam / np.max(cam)
+    return cam       
 
 
 def plot_trajs_and_points_on_image(
