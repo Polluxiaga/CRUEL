@@ -30,10 +30,9 @@ class PositionalEncoding(nn.Module):
 class MultiLayerDecoder_BC(nn.Module):
     def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, ff_dim_factor=4):
         super(MultiLayerDecoder_BC, self).__init__()
-        
-        # Define two separate positional encodings
+
         self.positional_encoding = PositionalEncoding(embed_dim, max_seq_len=seq_len)
-        
+
         self.sa_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=nhead,
@@ -43,19 +42,36 @@ class MultiLayerDecoder_BC(nn.Module):
             norm_first=True
         )
         self.sa_decoder = nn.TransformerEncoder(self.sa_layer, num_layers=num_layers)
+
         self.output_layers = nn.ModuleList([nn.Linear(seq_len * embed_dim, embed_dim)])
         self.output_layers.append(nn.Linear(embed_dim, output_layers[0]))
         for i in range(len(output_layers) - 1):
             self.output_layers.append(nn.Linear(output_layers[i], output_layers[i+1]))
 
+        self.attention_scores = None
+        self.avg_attention_scores = None
+
     def forward(self, x):
         x = self.positional_encoding(x)
-        x = self.sa_decoder(x)
+
+        # 手动调用 self_attn，确保它返回 attn_weights
+        attn_weights_list = []
+        for layer in self.sa_decoder.layers:
+            x = layer.norm1(x)  # 归一化
+            attn_output, attn_weights = layer.self_attn(x, x, x, need_weights=True)  # 关键：传 need_weights=True
+            attn_weights_list.append(attn_weights.detach())  # 存储注意力权重
+            x = x + layer.dropout1(attn_output)  # 残差连接
+            x = x + layer.dropout2(layer.norm2(layer.linear2(layer.dropout(layer.activation(layer.linear1(x))))))  # FFN
+        
+        self.attention_scores = torch.stack(attn_weights_list, dim=0)  # 叠加所有层的注意力
+        self.avg_attention_scores = torch.mean(self.attention_scores, dim=0)  # 平均注意力权重
+
         x = x.reshape(x.shape[0], -1)
-        for i in range(len(self.output_layers)):
-            x = self.output_layers[i](x)
+        for layer in self.output_layers:
+            x = layer(x)
             x = F.relu(x)
-        return x
+
+        return x, self.avg_attention_scores
 
     
 class ViNT_BC(nn.Module):
@@ -169,7 +185,7 @@ class ViNT_BC(nn.Module):
         tokens = tokens.reshape(batch_size, (self.context_size+1)*H*W, self.encoding_size)  # [batch_size, (context_size+1)*H/32*W/32, encoding_size]
         
         # 3. Transformer解码器处理
-        final_repr = self.decoder(tokens)  # [batch_size, 32]
+        final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
         action_pred = self.action_predictor(final_repr)
         action_pred = action_pred.reshape(
             (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
@@ -180,7 +196,7 @@ class ViNT_BC(nn.Module):
         handle.remove()
 
         # 返回预测结果和中间特征
-        return action_pred, self._raw_obs_features
+        return action_pred, self._raw_obs_features, attention_scores
 
     @torch.utils.hooks.unserializable_hook
     def _capture_obs_features_grad(self, grad):

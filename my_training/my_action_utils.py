@@ -7,6 +7,7 @@ import cv2 # type: ignore
 from typing import Optional
 import wandb
 import yaml
+import seaborn as sns # type: ignore
 
 # load data_config.yaml
 with open(os.path.join(os.path.dirname(__file__), "../my_data/my_data_config.yaml"), "r") as f:
@@ -27,12 +28,75 @@ def np2img(arr: np.ndarray) -> Image:
     return img
 
 
-def visualize_traj_pred_BC(
+def plot_trajs_and_points(
+    ax: plt.Axes,
+    list_trajs: list,  # [pred_waypoints, label_waypoints]
+    traj_colors: list = [CYAN, MAGENTA],
+    traj_labels: list = ["prediction", "ground truth"],
+):
+    """
+    Plot trajectories and points.
+
+    Args:
+        ax: matplotlib axis
+        list_trajs: list of trajectories, each trajectory is a numpy array of shape (horizon, 2)
+        list_points: list of points, each point is a numpy array of shape (2,)
+        traj_colors: list of colors for trajectories
+        traj_labels: list of labels for trajectories
+    """
+
+    # Define the start position (0, 0)
+    start_pos = (0, 0)
+
+    for i, traj in enumerate(list_trajs):
+        ax.plot(
+            traj[:, 0],
+            traj[:, 1],
+            color=traj_colors[i],
+            label=traj_labels[i],
+            alpha=1.0,
+            marker="o",
+        )
+
+        ax.plot(
+            [start_pos[0], traj[0, 0]],  # X coordinates of the line: (0, 1st point of traj)
+            [start_pos[1], traj[0, 1]],  # Y coordinates of the line: (0, 1st point of traj)
+            color=traj_colors[i],  # Use the same color as the trajectory
+            alpha=1.0,
+        )
+    
+    ax.set_aspect("equal", "box")
+    # put the legend below the plot
+    if traj_labels is not None or point_labels is not None:
+        ax.legend(bbox_to_anchor=(0.0, -0.5), loc="upper left", ncol=2)
+
+
+def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarray:
+    """
+    根据特征图和梯度计算Grad-CAM热力图。
+    Args:
+        features: 形状为 (C, H, W) 的特征图
+        grads: 与features形状相同的梯度
+    Returns:
+        热力图，范围 [0, 1]
+    """
+    # 对每个通道计算梯度均值作为权重
+    weights = np.mean(grads, axis=(1, 2), keepdims=True)  # shape: (C, 1, 1)
+    cam = np.sum(weights * features, axis=0)  # 聚合特征图，shape: (H, W)
+    # 仅保留正值，并归一化
+    cam = np.maximum(cam, 0)
+    if np.max(cam) != 0:
+        cam = cam / np.max(cam)
+    return cam       
+
+
+def visualize_BC(
     batch_obs_images: np.ndarray,
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
     obs_features: np.ndarray,
     obs_features_grads: np.ndarray,
+    attention_scores: np.ndarray,
     eval_type: str,
     normalized: bool,
     save_folder: str,
@@ -86,6 +150,7 @@ def visualize_traj_pred_BC(
         label_waypoints = batch_label_waypoints[i]
         obs_feature = obs_features[i]
         obs_feature_grad = obs_features_grads[i]
+        attention_score = attention_scores[i]
 
         if normalized:
             pred_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
@@ -95,13 +160,14 @@ def visualize_traj_pred_BC(
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
 
-        compare_waypoints_pred_to_label_BC(
+        draw_BC(
             obs_img,
             dataset_name,
             pred_waypoints,
             label_waypoints,
             obs_feature,
             obs_feature_grad,
+            attention_score,
             save_path,
             display,
         )
@@ -111,7 +177,80 @@ def visualize_traj_pred_BC(
         wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
 
 
-def visualize_traj_pred_GOAL(
+def draw_BC(
+    obs_img,
+    dataset_name: str,
+    pred_waypoints: np.ndarray,
+    label_waypoints: np.ndarray,
+    obs_feature: np.ndarray,
+    obs_feature_grad: Optional[np.ndarray],
+    attention_scores: np.ndarray,
+    save_path: Optional[str] = None,
+    display: Optional[bool] = False,
+):
+    """
+    使用Grad-CAM加权特征生成热力图，并与观测图叠加，同时绘制预测轨迹和标注轨迹.
+
+    Args:
+        obs_img: PIL Image格式的观测图
+        dataset_name: 数据集名称
+        pred_waypoints: 预测轨迹，形状 [N,2]
+        label_waypoints: 标注轨迹，形状 [N,2]
+        obs_feature: 观测图对应的特征图 (C, H, W)
+        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
+        save_path: 保存图像的路径
+        display: 是否显示图像
+    """
+    features = (
+        obs_feature
+        if isinstance(obs_feature, np.ndarray)
+        else obs_feature.detach().cpu().numpy()
+    )
+    
+    if obs_feature_grad is not None:
+        grads = (
+            obs_feature_grad
+            if isinstance(obs_feature_grad, np.ndarray)
+            else obs_feature_grad.detach().cpu().numpy()
+        )
+    else:
+        print("未能获取有效梯度信息，采用简单平均作为热力图。")
+        grads = np.ones_like(features)
+
+    # 计算Grad-CAM热力图 (H, W)
+    cam = compute_gradcam_heatmap(features, grads)
+    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+    # 叠加热力图到观测图
+    obs_img_np = np.array(obs_img)
+    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
+
+    # 绘制预测轨迹和标注轨迹
+    fig, ax = plt.subplots(1, 3, figsize=(18.5, 10.5))
+
+    plot_trajs_and_points(
+        ax[0],
+        [pred_waypoints, label_waypoints],
+        traj_colors=[CYAN, MAGENTA],
+    )
+    ax[0].set_title("Action Prediction")
+
+    ax[1].imshow(heatmap_img)
+    ax[1].set_title("Current with Grad-CAM")
+
+    sns.heatmap(attention_scores, cmap="viridis", annot=False, fmt=".2f", ax=ax[2], square=True)
+    ax[2].set_title("Attention Map")
+
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+
+    if not display:
+        plt.close(fig)
+
+
+def visualize_GOAL(
     batch_obs_images: np.ndarray,
     batch_goal_images: np.ndarray,
     batch_pred_waypoints: np.ndarray,
@@ -182,7 +321,7 @@ def visualize_traj_pred_GOAL(
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
 
-        compare_waypoints_pred_to_label_GOAL(
+        draw_GOAL(
             obs_img,
             goal_img,
             dataset_name,
@@ -198,77 +337,7 @@ def visualize_traj_pred_GOAL(
     if use_wandb:
         wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
 
-
-def compare_waypoints_pred_to_label_BC(
-    obs_img,
-    dataset_name: str,
-    pred_waypoints: np.ndarray,
-    label_waypoints: np.ndarray,
-    obs_feature: np.ndarray,
-    obs_feature_grad: Optional[np.ndarray],
-    save_path: Optional[str] = None,
-    display: Optional[bool] = False,
-):
-    """
-    使用Grad-CAM加权特征生成热力图，并与观测图叠加，同时绘制预测轨迹和标注轨迹.
-
-    Args:
-        obs_img: PIL Image格式的观测图
-        dataset_name: 数据集名称
-        pred_waypoints: 预测轨迹，形状 [N,2]
-        label_waypoints: 标注轨迹，形状 [N,2]
-        obs_feature: 观测图对应的特征图 (C, H, W)
-        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
-        save_path: 保存图像的路径
-        display: 是否显示图像
-    """
-    features = (
-        obs_feature
-        if isinstance(obs_feature, np.ndarray)
-        else obs_feature.detach().cpu().numpy()
-    )
-    
-    if obs_feature_grad is not None:
-        grads = (
-            obs_feature_grad
-            if isinstance(obs_feature_grad, np.ndarray)
-            else obs_feature_grad.detach().cpu().numpy()
-        )
-    else:
-        print("未能获取有效梯度信息，采用简单平均作为热力图。")
-        grads = np.ones_like(features)
-
-    # 计算Grad-CAM热力图 (H, W)
-    cam = compute_gradcam_heatmap(features, grads)
-    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-
-    # 叠加热力图到观测图
-    obs_img_np = np.array(obs_img)
-    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
-
-    # 绘制预测轨迹和标注轨迹
-    fig, ax = plt.subplots(1, 2, figsize=(18.5, 10.5))
-
-    plot_trajs_and_points(
-        ax[0],
-        [pred_waypoints, label_waypoints],
-        traj_colors=[CYAN, MAGENTA],
-    )
-    ax[0].set_title("Action Prediction")
-
-    ax[1].imshow(heatmap_img)
-    ax[1].set_title("Current with Grad-CAM")
-
-    if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
-
-    if not display:
-        plt.close(fig)
-
-
-def compare_waypoints_pred_to_label_GOAL(
+def draw_GOAL(
     obs_img,
     goal_img,
     dataset_name: str,
@@ -337,199 +406,3 @@ def compare_waypoints_pred_to_label_GOAL(
 
     if not display:
         plt.close(fig)
-
-
-def plot_trajs_and_points(
-    ax: plt.Axes,
-    list_trajs: list,  # [pred_waypoints, label_waypoints]
-    traj_colors: list = [CYAN, MAGENTA],
-    traj_labels: list = ["prediction", "ground truth"],
-):
-    """
-    Plot trajectories and points.
-
-    Args:
-        ax: matplotlib axis
-        list_trajs: list of trajectories, each trajectory is a numpy array of shape (horizon, 2)
-        list_points: list of points, each point is a numpy array of shape (2,)
-        traj_colors: list of colors for trajectories
-        traj_labels: list of labels for trajectories
-    """
-
-    # Define the start position (0, 0)
-    start_pos = (0, 0)
-
-    for i, traj in enumerate(list_trajs):
-        ax.plot(
-            traj[:, 0],
-            traj[:, 1],
-            color=traj_colors[i],
-            label=traj_labels[i],
-            alpha=1.0,
-            marker="o",
-        )
-
-        ax.plot(
-            [start_pos[0], traj[0, 0]],  # X coordinates of the line: (0, 1st point of traj)
-            [start_pos[1], traj[0, 1]],  # Y coordinates of the line: (0, 1st point of traj)
-            color=traj_colors[i],  # Use the same color as the trajectory
-            alpha=1.0,
-        )
-    
-    ax.set_aspect("equal", "box")
-    # put the legend below the plot
-    if traj_labels is not None or point_labels is not None:
-        ax.legend(bbox_to_anchor=(0.0, -0.5), loc="upper left", ncol=2)
-
-
-def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarray:
-    """
-    根据特征图和梯度计算Grad-CAM热力图。
-    Args:
-        features: 形状为 (C, H, W) 的特征图
-        grads: 与features形状相同的梯度
-    Returns:
-        热力图，范围 [0, 1]
-    """
-    # 对每个通道计算梯度均值作为权重
-    weights = np.mean(grads, axis=(1, 2), keepdims=True)  # shape: (C, 1, 1)
-    cam = np.sum(weights * features, axis=0)  # 聚合特征图，shape: (H, W)
-    # 仅保留正值，并归一化
-    cam = np.maximum(cam, 0)
-    if np.max(cam) != 0:
-        cam = cam / np.max(cam)
-    return cam       
-
-
-def plot_trajs_and_points_on_image(
-    ax: plt.Axes,
-    img: np.ndarray,
-    dataset_name: str,
-    list_trajs: list,
-    traj_colors: list = [CYAN, MAGENTA],
-):
-    """
-    Plot trajectories and points on an image. If there is no configuration for the camera interinstics of the dataset, the image will be plotted as is.
-    Args:
-        ax: matplotlib axis
-        img: image to plot
-        dataset_name: name of the dataset found in data_config.yaml (e.g. "recon")
-        list_trajs: list of trajectories, each trajectory is a numpy array of shape (horizon, 2)
-        traj_colors: list of colors for trajectories
-    """
-    assert len(list_trajs) <= len(traj_colors), "Not enough colors for trajectories"
-
-    ax.imshow(img)
-    if (
-        "camera_metrics" in data_config[dataset_name]
-        and "camera_height" in data_config[dataset_name]["camera_metrics"]
-        and "camera_matrix" in data_config[dataset_name]["camera_metrics"]
-        and "dist_coeffs" in data_config[dataset_name]["camera_metrics"]
-    ):
-        camera_height = data_config[dataset_name]["camera_metrics"]["camera_height"]
-        camera_x_offset = data_config[dataset_name]["camera_metrics"]["camera_x_offset"]
-
-        fx = data_config[dataset_name]["camera_metrics"]["camera_matrix"]["fx"]
-        fy = data_config[dataset_name]["camera_metrics"]["camera_matrix"]["fy"]
-        cx = data_config[dataset_name]["camera_metrics"]["camera_matrix"]["cx"]
-        cy = data_config[dataset_name]["camera_metrics"]["camera_matrix"]["cy"]
-        camera_matrix = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-
-        k1 = data_config[dataset_name]["camera_metrics"]["dist_coeffs"]["k1"]
-        k2 = data_config[dataset_name]["camera_metrics"]["dist_coeffs"]["k2"]
-        p1 = data_config[dataset_name]["camera_metrics"]["dist_coeffs"]["p1"]
-        p2 = data_config[dataset_name]["camera_metrics"]["dist_coeffs"]["p2"]
-        k3 = data_config[dataset_name]["camera_metrics"]["dist_coeffs"]["k3"]
-        dist_coeffs = np.array([k1, k2, p1, p2, k3, 0.0, 0.0, 0.0])
-
-        for i, traj in enumerate(list_trajs):
-            traj_pixels = get_pos_pixels(
-                traj, camera_height, camera_x_offset, camera_matrix, dist_coeffs
-            )
-            ax.plot(
-                traj_pixels[:250, 0],
-                traj_pixels[:250, 1],
-                color=traj_colors[i],
-                lw=2.5,
-                )
-
-        ax.xaxis.set_visible(False)
-        ax.yaxis.set_visible(False)
-        ax.set_xlim((0.5, VIZ_IMAGE_SIZE[0] - 0.5))
-        ax.set_ylim((VIZ_IMAGE_SIZE[1] - 0.5, 0.5))
-
-
-def get_pos_pixels(
-    points: np.ndarray,  # traj (waypoints in local coordinates)
-    camera_height: float,
-    camera_x_offset: float,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-):
-    """
-    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
-    Args:
-        points: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
-        camera_height: height of the camera above the ground (in meters)
-        camera_x_offset: offset of the camera from the center of the car (in meters)
-        camera_matrix: 3x3 matrix representing the camera's intrinsic parameters
-        dist_coeffs: vector of distortion coefficients
-
-    Returns:
-        pixels: array of shape (batch_size, horizon, 2) representing (u, v) coordinates on the 2D image plane
-    """
-    pixels = project_points(
-        points[np.newaxis], camera_height, camera_x_offset, camera_matrix, dist_coeffs
-    )[0]
-    print(pixels)
-    pixels[:, 0] = VIZ_IMAGE_SIZE[0] - pixels[:, 0]
-    print(pixels)
-    pixels = np.array(
-        [
-            p
-            for p in pixels
-            if np.all(p > 0) and np.all(p < [VIZ_IMAGE_SIZE[0], VIZ_IMAGE_SIZE[1]])
-        ]
-    )
-    return pixels
-
-
-def project_points(
-    xy: np.ndarray,  # traj (waypoints in local coordinates)
-    camera_height: float,
-    camera_x_offset: float,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-):
-    """
-    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
-
-    Args:
-        xy: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
-        camera_height: height of the camera above the ground (in meters)
-        camera_x_offset: offset of the camera from the center of the car (in meters)
-        camera_matrix: 3x3 matrix representing the camera's intrinsic parameters
-        dist_coeffs: vector of distortion coefficients
-
-
-    Returns:
-        uv: array of shape (batch_size, horizon, 2) representing (u, v) coordinates on the 2D image plane
-    """
-    batch_size, horizon, _ = xy.shape
-
-    # create 3D coordinates with the camera positioned at the given height
-    xyz = np.concatenate(
-        [xy, -camera_height * np.ones(list(xy.shape[:-1]) + [1])], axis=-1
-    )
-
-    # create dummy rotation and translation vectors
-    rvec = tvec = (0, 0, 0)
-
-    xyz[..., 0] += camera_x_offset
-    xyz_cv = np.stack([xyz[..., 1], -xyz[..., 2], xyz[..., 0]], axis=-1)
-    uv, _ = cv2.projectPoints(
-        xyz_cv.reshape(batch_size * horizon, 3), rvec, tvec, camera_matrix, dist_coeffs
-    )
-    uv = uv.reshape(batch_size, horizon, 2)
-
-    return uv
