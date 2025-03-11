@@ -27,13 +27,27 @@ class PositionalEncoding(nn.Module):
         return x
     
 
+class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    """ 自定义 TransformerEncoderLayer，强制返回 attn_weights """
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        src2, attn_weights = self.self_attn(src, src, src, attn_mask=src_mask, 
+                                            key_padding_mask=src_key_padding_mask, 
+                                            need_weights=True)  # 强制输出注意力权重
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src, attn_weights  # 直接返回注意力权重
+
+
 class MultiLayerDecoder_BC(nn.Module):
     def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, ff_dim_factor=4):
         super(MultiLayerDecoder_BC, self).__init__()
-
+        
         self.positional_encoding = PositionalEncoding(embed_dim, max_seq_len=seq_len)
-
-        self.sa_layer = nn.TransformerEncoderLayer(
+        
+        self.sa_layer = CustomTransformerEncoderLayer(
             d_model=embed_dim,
             nhead=nhead,
             dim_feedforward=ff_dim_factor * embed_dim,
@@ -41,37 +55,30 @@ class MultiLayerDecoder_BC(nn.Module):
             batch_first=True,
             norm_first=True
         )
-        self.sa_decoder = nn.TransformerEncoder(self.sa_layer, num_layers=num_layers)
+        self.sa_decoder = nn.ModuleList([self.sa_layer for _ in range(num_layers)])  # 手动堆叠多层
 
-        self.output_layers = nn.ModuleList([nn.Linear(seq_len * embed_dim, embed_dim)])
-        self.output_layers.append(nn.Linear(embed_dim, output_layers[0]))
-        for i in range(len(output_layers) - 1):
-            self.output_layers.append(nn.Linear(output_layers[i], output_layers[i+1]))
-
-        self.attention_scores = None
-        self.avg_attention_scores = None
+        # 全连接层
+        self.output_layer = nn.ModuleList([
+            nn.Linear(seq_len * embed_dim, output_layers[0])] + [
+            nn.Linear(output_layers[i], output_layers[i + 1]) for i in range(len(output_layers) - 1)])
 
     def forward(self, x):
         x = self.positional_encoding(x)
+        attn_scores_list = []
+        for layer in self.sa_decoder:
+            x, attn_weights = layer(x)
+            attn_scores_list.append(attn_weights)
 
-        # 手动调用 self_attn，确保它返回 attn_weights
-        attn_weights_list = []
-        for layer in self.sa_decoder.layers:
-            x = layer.norm1(x)  # 归一化
-            attn_output, attn_weights = layer.self_attn(x, x, x, need_weights=True)  # 关键：传 need_weights=True
-            attn_weights_list.append(attn_weights.detach())  # 存储注意力权重
-            x = x + layer.dropout1(attn_output)  # 残差连接
-            x = x + layer.dropout2(layer.norm2(layer.linear2(layer.dropout(layer.activation(layer.linear1(x))))))  # FFN
-        
-        self.attention_scores = torch.stack(attn_weights_list, dim=0)  # 叠加所有层的注意力
-        self.avg_attention_scores = torch.mean(self.attention_scores, dim=0)  # 平均注意力权重
+        # 计算平均注意力权重
+        attention_scores = torch.stack(attn_scores_list, dim=0)  # [num_layers, batch_size, seq_len, seq_len]
+        avg_attention_scores = torch.mean(attention_scores, dim=0)  # [batch_size, seq_len, seq_len]
 
         x = x.reshape(x.shape[0], -1)
-        for layer in self.output_layers:
+        for layer in self.output_layer:
             x = layer(x)
             x = F.relu(x)
 
-        return x, self.avg_attention_scores
+        return x, avg_attention_scores
 
     
 class ViNT_BC(nn.Module):
