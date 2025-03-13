@@ -166,7 +166,7 @@ class ViNT_BC(nn.Module):
             )  # [context_size+1, batch_size, 40, H/8, W/8]
 
         # 注册任意层的hook
-        requested_layer = list(self.obs_encoder._blocks)[4]  # 获取H/8分辨率的中间层
+        requested_layer = list(self.obs_encoder._blocks)[-1]  # 获取H/8分辨率的中间层
         handle = requested_layer.register_forward_hook(get_requested_features)
 
         # 2. 正常前向传播，获取最终的全局特征
