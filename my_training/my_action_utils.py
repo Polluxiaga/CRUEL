@@ -152,10 +152,6 @@ def visualize_BC(
         obs_feature_grad = obs_features_grads[i]
         attention_score = attention_scores[i]
 
-        if normalized:
-            pred_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
-            label_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
-
         save_path = None
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")

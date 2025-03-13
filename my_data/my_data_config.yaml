@@ -5,7 +5,7 @@ action_stats:
   max: [5, 4] # [max_dx, max_dy]
 
 # data specific params
-scand:
+ourdata:
   metric_waypoint_spacing: 0.38 # average spacing between waypoints (meters)
 
   # OPTIONAL (FOR VISUALIZATION ONLY)

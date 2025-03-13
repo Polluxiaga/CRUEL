@@ -1,7 +1,7 @@
 project_name: my_vint
 run_name: vint
-load_run: "my_vint/vint_2025_03_11_01_19_57"
-run_id: "prr5xj9u"
+load_run: "my_vint/vint_2025_03_13_15_57_16"
+run_id: "8aodddq1"
 
 # training setup
 method: "BC" # BC or GOAL
@@ -48,7 +48,7 @@ close_far_threshold: 10 # distance threshold used to seperate the close and the 
 len_traj_pred: 3
 
 # dataset specific parameters
-image_size: [85, 64] # width, height
+image_size: [224, 128] # width, height
 obs_type: "image"
 goal_type: "image"
 
@@ -62,9 +62,9 @@ datasets:
   #   negative_mining: True
 
   scand:
-    data_folder: /home/yzc/CRUEL/my_scand
-    train: /home/yzc/CRUEL/my_scand_splits/train/ #data_splits_folder
-    test: /home/yzc/CRUEL/my_scand_splits/test/ #data_splits_folder
+    data_folder: /home/yzc/CRUEL/ourdata
+    train: /home/yzc/CRUEL/ourdata_splits/train/ #data_splits_folder
+    test: /home/yzc/CRUEL/ourdata_splits/test/ #data_splits_folder
     end_slack: 0
     goals_per_obs: 3
     negative_mining: False

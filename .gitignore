@@ -2,6 +2,8 @@ my_logs/*
 wandb/*
 my_scand/*
 my_scand_splits/*
+ourdata/*
+ourdata_splits/*
 
 .vscode/*
 */.vscode/*
@@ -14,3 +16,4 @@ my_scand_splits/*
 
 __pycache__/
 .DS_Store
+nohup.out

@@ -4,15 +4,14 @@ from PIL import Image
 from typing import Tuple
 
 import torch
-from torchvision import transforms
 import torchvision.transforms.functional as TF
 import io
 from typing import Union
 
-VISUALIZATION_IMAGE_SIZE = (160, 120)
+VISUALIZATION_IMAGE_SIZE = (224, 128)
 IMAGE_ASPECT_RATIO = (
-    4 / 3
-)  # all images are centered cropped to a 4:3 aspect ratio in training
+    7 / 4
+)  # all images are centered cropped to a 7:4 aspect ratio in training
 
 
 def ts2np(tensor: torch.Tensor) -> np.ndarray:
