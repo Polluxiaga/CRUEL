@@ -17,6 +17,16 @@ def remove_files_in_dir(dir_path: str):
         except Exception as e:
             print("Failed to delete %s. Reason: %s" % (file_path, e))
 
+def find_traj_folders(data_dir: str):
+    """
+    递归查找包含 'traj_data.pkl' 文件的文件夹，并返回相对于 data_dir 的路径。
+    """
+    traj_folders = []
+    for root, dirs, files in os.walk(data_dir):
+        if "traj_data.pkl" in files:
+            traj_folders.append(os.path.relpath(root, data_dir))  # 使用相对路径
+    return traj_folders
+
 def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: float = 0.8):
     """
     从指定目录提取数据，分割成训练集和测试集，并保存到指定的目标文件夹中。
@@ -28,11 +38,7 @@ def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: 
     - data_splits_dir: 数据分割后保存的目标目录
     """
     # 获取包含 'traj_data.pkl' 文件的文件夹名称
-    folder_names = [
-        f
-        for f in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, f)) and "traj_data.pkl" in os.listdir(os.path.join(data_dir, f))
-    ]
+    folder_names = find_traj_folders(data_dir)
 
     # 随机打乱文件夹名称
     random.shuffle(folder_names)
