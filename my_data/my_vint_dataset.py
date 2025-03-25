@@ -190,8 +190,6 @@ class ViNT_Dataset_BC(Dataset):
             print(f"{pos.shape} and {(self.len_traj_pred + 1, 2)} should be equal")
 
         waypoints = to_local_coords(pos, pos[0])
-        if waypoints[-1][1] < 0:
-            waypoints = -waypoints
         assert waypoints.shape == (self.len_traj_pred + 1, 2), f"{waypoints.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
 
         actions = waypoints[1:]
