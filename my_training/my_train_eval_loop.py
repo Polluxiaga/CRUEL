@@ -63,7 +63,7 @@ def train_eval_loop(
     for epoch in range(current_epoch, epochs):
         if train_model:
             print(
-            f"Start ViNT Training Epoch {epoch}/{epochs - 1}"
+                f"Start ViNT Training Epoch {epoch}/{epochs - 1}"
             )
             if train_method == "GOAL":
                 train_GOAL(
@@ -159,6 +159,9 @@ def train_eval_loop(
         torch.save(checkpoint, latest_path)
         torch.save(checkpoint, numbered_path)  # keep track of model at every epoch
 
+        # 每个epoch结束后清空GPU缓存
+        torch.cuda.empty_cache()
+
     # Flush the last set of eval logs
     wandb.log({})
     print()
@@ -182,7 +185,7 @@ def count_parameters(model):
         if not parameter.requires_grad: continue
         params = parameter.numel()
         table.add_row([name, params])
-        total_params+=params
+        total_params += params
     # print(table)
     print(f"Total Trainable Params: {total_params/1e6:.2f}M")
     return total_params

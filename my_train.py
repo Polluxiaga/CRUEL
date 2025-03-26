@@ -20,7 +20,7 @@ from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 def main(config):
 
-    torch.set_num_threads(12)
+    torch.set_num_threads(16)
     
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -105,6 +105,8 @@ def main(config):
         num_workers=config["num_workers"],
         drop_last=False,
         persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=2
     )
     for dataset_type, dataset in test_dataloaders.items():
         test_dataloaders[dataset_type] = DataLoader(
@@ -216,7 +218,12 @@ def main(config):
 
     # Multi-GPU
     if len(config["gpu_ids"]) > 1:
-        model = nn.DataParallel(model, device_ids=config["gpu_ids"])
+        model = nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[first_gpu_id],
+        output_device=first_gpu_id,
+        find_unused_parameters=True  # 重要！
+    )
     model = model.to(device)
 
 
