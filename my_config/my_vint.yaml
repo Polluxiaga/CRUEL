@@ -6,10 +6,10 @@ run_name: vint
 method: "BC" # BC or GOAL
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
-batch_size: 256
+batch_size: 128
 epochs: 100
 gpu_ids: [0]
-num_workers: 2
+num_workers: 8
 lr: 5e-4
 optimizer: adamw
 clipping: False
@@ -74,9 +74,9 @@ datasets:
 # logging stuff
 ## =0 turns off
 print_log_freq: 1 # in iterations
-image_log_freq: 4 # in iterations
-num_images_log: 8 #0 
+image_log_freq: 8 # in iterations
+num_images_log: 6 #0 
 pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
-wandb_log_freq: 2 # in iterations
+wandb_log_freq: 5 # in iterations
 eval_freq: 1 # in epochs
