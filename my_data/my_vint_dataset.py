@@ -107,7 +107,7 @@ class ViNT_Dataset_BC(Dataset):
                 goals_index.append((traj_name, goal_time))
 
             begin_time = self.context_size
-            end_time = traj_len - self.len_traj_pred
+            end_time = traj_len - self.len_traj_pred * 3
             for curr_time in range(begin_time, end_time):
                 samples_index.append((traj_name, curr_time))
 
@@ -182,8 +182,8 @@ class ViNT_Dataset_BC(Dataset):
 
     def _compute_actions(self, traj_data, curr_time):
         start_index = curr_time
-        end_index = curr_time + self.len_traj_pred + 1
-        pos = traj_data[["pos_x(m)", "pos_y(m)"]][start_index:end_index].to_numpy(dtype=np.float64)
+        end_index = curr_time + self.len_traj_pred * 3 + 1
+        pos = traj_data[["pos_x(m)", "pos_y(m)"]][start_index:end_index:3].to_numpy(dtype=np.float64)
         pos = np.stack([np.array(item) for item in pos], axis=0)
 
         if pos.shape != (self.len_traj_pred + 1, 2):
@@ -333,7 +333,7 @@ class ViNT_Dataset_GOAL(Dataset):
                 goals_index.append((traj_name, goal_time))
 
             begin_time = self.context_size
-            end_time = traj_len - self.len_traj_pred
+            end_time = traj_len - self.len_traj_pred * 3
             for curr_time in range(begin_time, end_time):
                 samples_index.append((traj_name, curr_time))
 
@@ -408,8 +408,8 @@ class ViNT_Dataset_GOAL(Dataset):
 
     def _compute_actions(self, traj_data, curr_time):
         start_index = curr_time
-        end_index = curr_time + self.len_traj_pred + 1
-        pos = traj_data[["pos_x(m)", "pos_y(m)"]][start_index:end_index]
+        end_index = curr_time + self.len_traj_pred * 3 + 1
+        pos = traj_data[["pos_x(m)", "pos_y(m)"]][start_index:end_index:3].to_numpy(dtype=np.float64)
 
         if pos.shape != (self.len_traj_pred + 1, 2):
             print(f"{pos.shape} and {(self.len_traj_pred + 1, 2)} should be equal")
@@ -418,9 +418,6 @@ class ViNT_Dataset_GOAL(Dataset):
         assert waypoints.shape == (self.len_traj_pred + 1, 2), f"{waypoints.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
 
         actions = waypoints[1:]
-        if self.normalize:
-            actions[:, :2] /= self.data_config["metric_waypoint_spacing"]
-        assert actions.shape == (self.len_traj_pred, 2), f"{actions.shape} and {(self.len_traj_pred, 2)} should be equal"
 
         return actions
     

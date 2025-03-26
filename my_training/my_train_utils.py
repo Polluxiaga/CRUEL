@@ -234,7 +234,6 @@ def train_BC(
 
 
 def evaluate_BC(
-    eval_type: str,
     model: nn.Module,
     dataloader: DataLoader,
     transform: transforms,
@@ -256,9 +255,9 @@ def evaluate_BC(
 
     # 初始化日志器
     loggers = {
-        "action_loss": Logger("action_loss", eval_type),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", eval_type),
-        "multi_action_waypts_cos_sim": Logger("multi_action_waypts_cos_sim", eval_type),
+        "action_loss": Logger("action_loss", "test"),
+        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
+        "multi_action_waypts_cos_sim": Logger("multi_action_waypts_cos_sim", "test"),
     }
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
@@ -271,7 +270,7 @@ def evaluate_BC(
         total=num_batches,
         disable=not use_tqdm,
         dynamic_ncols=True,
-        desc=f"Evaluating {eval_type} for epoch {epoch}",
+        desc=f"Evaluating for epoch {epoch}",
     )
 
     for i, data in enumerate(tqdm_iter):
@@ -346,7 +345,7 @@ def evaluate_BC(
                 attention_scores=attention_scores,
                 action_label=action_label,
                 use_wandb=use_wandb,
-                mode=eval_type,
+                mode="test",
                 use_latest=False,
                 wandb_log_freq=1,
                 print_log_freq=1,
@@ -537,7 +536,6 @@ def train_GOAL(
 
 
 def evaluate_GOAL(
-    eval_type: str,  
     model: nn.Module,
     dataloader: DataLoader,
     transform: transforms,
@@ -559,9 +557,9 @@ def evaluate_GOAL(
 
     # 初始化日志器
     loggers = {
-        "action_loss": Logger("action_loss", eval_type),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", eval_type),
-        "multi_action_waypts_cos_sim": Logger("multi_action_waypts_cos_sim", eval_type),
+        "action_loss": Logger("action_loss", "test"),
+        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
+        "multi_action_waypts_cos_sim": Logger("multi_action_waypts_cos_sim", "test"),
     }
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
@@ -575,7 +573,7 @@ def evaluate_GOAL(
             total=num_batches,
             disable=not use_tqdm,
             dynamic_ncols=True,
-            desc=f"Evaluating {eval_type} for epoch {epoch}",
+            desc=f"Evaluating for epoch {epoch}",
         )
 
         for i, data in enumerate(tqdm_iter):
@@ -658,7 +656,7 @@ def evaluate_GOAL(
                 viz_obs_feature_grad=viz_obs_feature_grad,
                 action_label=action_label,
                 use_wandb=use_wandb,
-                mode=eval_type,
+                mode="test",
                 use_latest=False,
                 wandb_log_freq=1,
                 print_log_freq=1,

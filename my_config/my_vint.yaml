@@ -1,6 +1,7 @@
 project_name: my_vint
 run_name: vint
-
+# load_run: "my_vint/vint_2025_03_26_11_39_39"
+# run_id: "1w4oeq7v"
 
 # training setup
 method: "BC" # BC or GOAL
@@ -44,7 +45,7 @@ action:
 close_far_threshold: 10 # distance threshold used to seperate the close and the far subgoals that are sampled per datapoint
 
 # action output params
-len_traj_pred: 3
+len_traj_pred: 2
 
 # dataset specific parameters
 image_size: [224, 128] # width, height
