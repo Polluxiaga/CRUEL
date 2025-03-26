@@ -8,7 +8,6 @@ from my_training.my_train_utils import train_GOAL, evaluate_GOAL, train_BC, eval
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torchvision import transforms
@@ -20,8 +19,8 @@ def train_eval_loop(
     model: nn.Module,
     optimizer: Adam,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
-    dataloader: DataLoader,
-    test_dataloaders: Dict[str, DataLoader],
+    train_loader: DataLoader,
+    test_loader: DataLoader,
     transform: transforms,
     epochs: int,
     device: torch.device,
@@ -69,7 +68,7 @@ def train_eval_loop(
                 train_GOAL(
                     model=model,
                     optimizer=optimizer,
-                    dataloader=dataloader,
+                    dataloader=train_loader,
                     transform=transform,
                     device=device,
                     run_folder=run_folder,
@@ -85,7 +84,7 @@ def train_eval_loop(
                 train_BC(
                     model=model,
                     optimizer=optimizer,
-                    dataloader=dataloader,
+                    dataloader=train_loader,
                     transform=transform,
                     device=device,
                     run_folder=run_folder,
@@ -98,47 +97,42 @@ def train_eval_loop(
                     use_wandb=use_wandb,
                 )
 
-        total_action_test_loss = []
-        for dataset_type in test_dataloaders:
-            print(
-                f"Start {dataset_type} ViNT Testing Epoch {epoch}/{current_epoch + epochs - 1}"
+        
+        print(
+            f"Start ViNT Testing Epoch {epoch}/{current_epoch + epochs - 1}"
+        )
+        if train_method == "GOAL":
+            action_test_loss = evaluate_GOAL(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                normalized=normalized,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
             )
-            loader = test_dataloaders[dataset_type]
-            if train_method == "GOAL":
-                action_test_loss = evaluate_GOAL(
-                    eval_type=dataset_type,
-                    model=model,
-                    dataloader=loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    normalized=normalized,
-                    epoch=epoch,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                    eval_fraction=eval_fraction,
-                )
-            elif train_method == "BC":
-                action_test_loss = evaluate_BC(
-                    eval_type=dataset_type,
-                    model=model,
-                    dataloader=loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    normalized=normalized,
-                    epoch=epoch,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                    eval_fraction=eval_fraction,
-                )
-            total_action_test_loss.append(action_test_loss)
+        elif train_method == "BC":
+            action_test_loss = evaluate_BC(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                normalized=normalized,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
 
         checkpoint = {
             "epoch": epoch,
             "model": model,
             "optimizer": optimizer,
-            "avg_action_test_loss": np.mean(total_action_test_loss),
+            "action_test_loss": action_test_loss,
             "scheduler": scheduler
         }
         # log average eval loss
@@ -147,11 +141,11 @@ def train_eval_loop(
         if scheduler is not None:
             # scheduler calls based on the type of scheduler
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(np.mean(total_action_test_loss))
+                scheduler.step(action_test_loss)
             else:
                 scheduler.step()
         wandb.log({
-            "avg_total_test_loss": np.mean(total_action_test_loss),
+            "action_test_loss": action_test_loss,
             "lr": optimizer.param_groups[0]["lr"],
         }, commit=False)
 

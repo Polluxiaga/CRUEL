@@ -97,7 +97,7 @@ def visualize_BC(
     obs_features: np.ndarray,
     obs_features_grads: np.ndarray,
     attention_scores: np.ndarray,
-    eval_type: str,
+    mode: str,
     normalized: bool,
     save_folder: str,
     epoch: int,
@@ -133,7 +133,7 @@ def visualize_BC(
     visualize_path = None
     if save_folder is not None:
         visualize_path = os.path.join(
-            save_folder, "visualize", eval_type, f"epoch{epoch}", "action_prediction"
+            save_folder, "visualize", mode, f"epoch{epoch}", "action_prediction"
         )
 
     if not os.path.exists(visualize_path):
@@ -170,7 +170,7 @@ def visualize_BC(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
+        wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
 
 
 def draw_BC(
@@ -253,7 +253,7 @@ def visualize_GOAL(
     batch_label_waypoints: np.ndarray,
     obs_features: np.ndarray,
     obs_features_grads: np.ndarray,
-    eval_type: str,
+    mode: str,
     normalized: bool,
     save_folder: str,
     epoch: int,
@@ -290,7 +290,7 @@ def visualize_GOAL(
     visualize_path = None
     if save_folder is not None:
         visualize_path = os.path.join(
-            save_folder, "visualize", eval_type, f"epoch{epoch}", "action_prediction"
+            save_folder, "visualize", mode, f"epoch{epoch}", "action_prediction"
         )
 
     if not os.path.exists(visualize_path):
@@ -331,7 +331,7 @@ def visualize_GOAL(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
+        wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
 
 def draw_GOAL(
     obs_img,

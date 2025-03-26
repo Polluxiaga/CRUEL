@@ -55,7 +55,7 @@ def main(config):
 
     # Load the data
     train_dataset = []
-    test_dataloaders = {}
+    test_dataset = []
     method = config["method"]
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
@@ -90,13 +90,8 @@ def main(config):
             if data_split_type == "train":
                 train_dataset.append(dataset)
             else:
-                dataset_type = f"{dataset_name}_test"
-                if dataset_type not in test_dataloaders:
-                    test_dataloaders[dataset_type] = {}
-                test_dataloaders[dataset_type] = dataset
+                test_dataset.append(dataset)
 
-
-    # combine all the datasets from different robots
     train_dataset = ConcatDataset(train_dataset)
     train_loader = DataLoader(
         train_dataset,
@@ -108,14 +103,15 @@ def main(config):
         pin_memory=True,
         prefetch_factor=2
     )
-    for dataset_type, dataset in test_dataloaders.items():
-        test_dataloaders[dataset_type] = DataLoader(
-            dataset,
-            batch_size=config["batch_size"],
-            shuffle=True,
-            num_workers=0,
-            drop_last=False,
-        )
+
+    test_dataset = ConcatDataset(test_dataset)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        num_workers=0,
+        drop_last=False,
+    )
 
 
     # Create the model
@@ -240,8 +236,8 @@ def main(config):
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
-        dataloader=train_loader,
-        test_dataloaders=test_dataloaders,
+        train_loader=train_loader,
+        test_loader=test_loader,
         transform=transform,
         epochs=config["epochs"],
         device=device,
