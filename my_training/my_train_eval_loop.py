@@ -1,7 +1,6 @@
 import wandb
 import os
-import numpy as np
-from typing import List, Optional, Dict
+from typing import Optional
 from prettytable import PrettyTable
 
 from my_training.my_train_utils import train_GOAL, evaluate_GOAL, train_BC, evaluate_BC

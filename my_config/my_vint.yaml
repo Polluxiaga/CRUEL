@@ -8,7 +8,7 @@ method: "BC" # BC or GOAL
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
 batch_size: 128
-epochs: 100
+epochs: 50
 gpu_ids: [0]
 num_workers: 8
 lr: 5e-4
@@ -61,7 +61,7 @@ datasets:
   #   goals_per_obs: 1
   #   negative_mining: True
 
-  scand:
+  ourdata:
     data_folder: /home/yzc/CRUEL/ourdata
     train: /home/yzc/CRUEL/ourdata_splits/train/ #data_splits_folder
     test: /home/yzc/CRUEL/ourdata_splits/test/ #data_splits_folder
@@ -74,7 +74,7 @@ datasets:
 
 # logging stuff
 ## =0 turns off
-print_log_freq: 1 # in iterations
+print_log_freq: 5 # in iterations
 image_log_freq: 8 # in iterations
 num_images_log: 6 #0 
 pairwise_test_freq: 0 # in epochs
