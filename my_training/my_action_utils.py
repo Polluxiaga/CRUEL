@@ -1,13 +1,12 @@
 import os
 import numpy as np
-import torch
 from PIL import Image
 import matplotlib.pyplot as plt
-import cv2 # type: ignore
+import cv2
 from typing import Optional
 import wandb
 import yaml
-import seaborn as sns # type: ignore
+import seaborn as sns
 
 # load data_config.yaml
 with open(os.path.join(os.path.dirname(__file__), "../my_data/my_data_config.yaml"), "r") as f:
@@ -139,8 +138,6 @@ def visualize_BC(
     if not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
-
-    dataset_name = "scand"
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
 
@@ -158,7 +155,6 @@ def visualize_BC(
 
         draw_BC(
             obs_img,
-            dataset_name,
             pred_waypoints,
             label_waypoints,
             obs_feature,
@@ -175,7 +171,6 @@ def visualize_BC(
 
 def draw_BC(
     obs_img,
-    dataset_name: str,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
     obs_feature: np.ndarray,
@@ -296,8 +291,6 @@ def visualize_GOAL(
     if not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
-
-    dataset_name = "scand"
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
 
@@ -309,10 +302,6 @@ def visualize_GOAL(
         obs_feature = obs_features[i]
         obs_feature_grad = obs_features_grads[i]
 
-        if normalized:
-            pred_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
-            label_waypoints *= data_config[dataset_name]["metric_waypoint_spacing"]
-
         save_path = None
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
@@ -320,7 +309,6 @@ def visualize_GOAL(
         draw_GOAL(
             obs_img,
             goal_img,
-            dataset_name,
             pred_waypoints,
             label_waypoints,
             obs_feature,
@@ -336,7 +324,6 @@ def visualize_GOAL(
 def draw_GOAL(
     obs_img,
     goal_img,
-    dataset_name: str,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
     obs_feature: np.ndarray,
