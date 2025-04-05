@@ -13,8 +13,8 @@ from torchvision import transforms
 import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
-from my_data.my_vint_dataset import ViNT_Dataset_GOAL, ViNT_Dataset_BC
-from my_model.my_vint import ViNT_GOAL, ViNT_BC
+from my_data.my_dataset import bc_dataset
+from my_model.base import bc
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
@@ -57,40 +57,22 @@ def main(config):
     train_dataset = []
     test_dataset = []
     method = config["method"]
-    for dataset_name in config["datasets"]:
-        data_config = config["datasets"][dataset_name]
-        for data_split_type in ["train", "test"]:
-            if method == "GOAL":
-                dataset = ViNT_Dataset_GOAL(
-                    data_folder=data_config["data_folder"],
-                    data_split_folder=data_config[data_split_type],
-                    dataset_name=dataset_name,
-                    image_size=config["image_size"],
-                    min_action_distance=config["action"]["min_dist_cat"],
-                    max_action_distance=config["action"]["max_dist_cat"],
-                    len_traj_pred=config["len_traj_pred"],
-                    context_size=config["context_size"],
-                    normalize=config["normalize"],
-                    obs_type=config["obs_type"],
-                    goal_type=config["goal_type"],
-                )
-            elif method == "BC":
-                dataset = ViNT_Dataset_BC(
-                    data_folder=data_config["data_folder"],
-                    data_split_folder=data_config[data_split_type],
-                    dataset_name=dataset_name,
-                    image_size=config["image_size"],
-                    min_action_distance=config["action"]["min_dist_cat"],
-                    max_action_distance=config["action"]["max_dist_cat"],
-                    len_traj_pred=config["len_traj_pred"],
-                    context_size=config["context_size"],
-                    normalize=config["normalize"],
-                    obs_type=config["obs_type"],
-                )
-            if data_split_type == "train":
-                train_dataset.append(dataset)
-            else:
-                test_dataset.append(dataset)
+    data_config = config["datasets"]["debugdata"]
+    for data_split_type in ["train", "test"]:
+        if method == "BC":
+            dataset = bc_dataset(
+                data_folder=data_config["data_folder"],
+                data_split_folder=data_config[data_split_type],
+                dataset_name="debugdata",
+                image_size=config["image_size"],
+                len_traj_pred=config["len_traj_pred"],
+                context_size=config["context_size"],
+                obs_type=config["obs_type"],
+            )
+        if data_split_type == "train":
+            train_dataset.append(dataset)
+        else:
+            test_dataset.append(dataset)
 
     train_dataset = ConcatDataset(train_dataset)
     train_loader = DataLoader(
@@ -115,18 +97,8 @@ def main(config):
 
 
     # Create the model
-    if config["model_type"] == "vint" and method == "GOAL":
-        model = ViNT_GOAL(
-            context_size=config["context_size"],
-            len_traj_pred=config["len_traj_pred"],
-            encoder=config["obs_encoder"],
-            encoding_size=config["encoding_size"],
-            mha_num_attention_heads=config["mha_num_attention_heads"],
-            mha_num_attention_layers=config["mha_num_attention_layers"],
-            mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        )
-    elif config["model_type"] == "vint" and method == "BC":
-        model = ViNT_BC(
+    if config["model_type"] == "vint" and method == "BC":
+        model = bc(
             context_size=config["context_size"],
             len_traj_pred=config["len_traj_pred"],
             encoder=config["obs_encoder"],
@@ -263,13 +235,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         "-c",
-        default="my_config/my_vint.yaml",
+        default="config.yaml",
         type=str,
         help="Path to the config file in train_config folder",
     )
     args = parser.parse_args()
 
-    with open("my_config/my_vint.yaml", "r") as f:
+    with open("config.yaml", "r") as f:
         default_config = yaml.safe_load(f)
     config = default_config
 
