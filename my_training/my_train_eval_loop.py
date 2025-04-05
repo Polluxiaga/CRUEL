@@ -3,7 +3,7 @@ import os
 from typing import Optional
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import train_GOAL, evaluate_GOAL, train_BC, evaluate_BC
+from my_training.my_train_utils import bc_train, bc_evaluate
 
 import torch
 import torch.nn as nn
@@ -63,24 +63,8 @@ def train_eval_loop(
             print(
                 f"Start ViNT Training Epoch {epoch}/{epochs - 1}"
             )
-            if train_method == "GOAL":
-                train_GOAL(
-                    model=model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    normalized=normalized,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "BC":
-                train_BC(
+            if train_method == "BC":
+                bc_train(
                     model=model,
                     optimizer=optimizer,
                     dataloader=train_loader,
@@ -100,21 +84,8 @@ def train_eval_loop(
         print(
             f"Start ViNT Testing Epoch {epoch}/{current_epoch + epochs - 1}"
         )
-        if train_method == "GOAL":
-            action_test_loss = evaluate_GOAL(
-                model=model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                normalized=normalized,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "BC":
-            action_test_loss = evaluate_BC(
+        if train_method == "BC":
+            action_test_loss = bc_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,

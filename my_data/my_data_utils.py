@@ -17,8 +17,6 @@ IMAGE_ASPECT_RATIO = (
 def ts2np(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().numpy()
 
-def np2ts(array: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(array).float()
 
 def get_data_path(data_folder: str, f: str, time: int, data_type: str = "image"):
     data_ext = {
@@ -48,24 +46,3 @@ def img_path_to_data(
     img = img.resize(image_resize_size)
     resize_img = TF.to_tensor(img)
     return resize_img
-
-
-# Convert positions to local coordinates
-def to_local_coords(
-        positions: np.ndarray, curr_pos: np.ndarray
-        ) -> np.ndarray:
-    """
-    Args:
-        positions (np.ndarray): positions to convert
-        curr_pos (np.ndarray): current position
-    Returns:
-        np.ndarray: positions in local coordinates
-    """
-
-    if positions.shape[-1] == 2:
-        pass
-    else:
-        raise ValueError
-
-    return positions - curr_pos
-

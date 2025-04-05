@@ -4,7 +4,8 @@ my_scand/*
 my_scand_splits/*
 ourdata/*
 ourdata_splits/*
-
+debugdata/*
+debugdata_splits/*
 .vscode/*
 */.vscode/*
 

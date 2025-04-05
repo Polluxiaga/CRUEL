@@ -5,12 +5,7 @@ import matplotlib.pyplot as plt
 import cv2
 from typing import Optional
 import wandb
-import yaml
 import seaborn as sns
-
-# load data_config.yaml
-with open(os.path.join(os.path.dirname(__file__), "../my_data/my_data_config.yaml"), "r") as f:
-    data_config = yaml.safe_load(f)
 
 VIZ_IMAGE_SIZE = (640, 480)
 RED = np.array([1, 0, 0])
@@ -89,7 +84,7 @@ def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarr
     return cam       
 
 
-def visualize_BC(
+def bc_visualize(
     batch_obs_images: np.ndarray,
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
@@ -153,7 +148,7 @@ def visualize_BC(
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
 
-        draw_BC(
+        bc_draw(
             obs_img,
             pred_waypoints,
             label_waypoints,
@@ -169,7 +164,7 @@ def visualize_BC(
         wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
 
 
-def draw_BC(
+def bc_draw(
     obs_img,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
@@ -233,156 +228,6 @@ def draw_BC(
 
     sns.heatmap(attention_scores, cmap="viridis", annot=False, fmt=".2f", ax=ax[2], square=True)
     ax[2].set_title("Attention Map")
-
-    if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
-
-    if not display:
-        plt.close(fig)
-
-
-def visualize_GOAL(
-    batch_obs_images: np.ndarray,
-    batch_goal_images: np.ndarray,
-    batch_pred_waypoints: np.ndarray,
-    batch_label_waypoints: np.ndarray,
-    obs_features: np.ndarray,
-    obs_features_grads: np.ndarray,
-    mode: str,
-    normalized: bool,
-    save_folder: str,
-    epoch: int,
-    num_images_preds: int = 8,
-    use_wandb: bool = True,
-    display: bool = False,
-):
-    """
-    Compare predicted path with the groundtruth path of waypoints using egocentric visualization. This visualization is for the last batch in the dataset.
-
-    Args:
-        batch_obs_images (np.ndarray): batch of observation images [batch_size, height, width, channels]
-        batch_goal_images (np.ndarray): batch of goal images [batch_size, height, width, channels]
-        dataset_names: indices corresponding to the dataset name
-        batch_pred_waypoints (np.ndarray): batch of predicted waypoints [batch_size, learn_traj_pred, 2]
-        batch_label_waypoints (np.ndarray): batch of label waypoints [batch_size, learn_traj_pred, 2]
-        obs_features (np.ndarray): batch of observation features [batch_size*(context_size+1+learn_traj_pred), num_features, height, width]
-        eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
-        normalized (bool): whether the waypoints are normalized
-        save_folder (str): folder to save the images. If None, will not save the images
-        epoch (int): current epoch number
-        num_images_preds (int): number of images to visualize
-        use_wandb (bool): whether to use wandb to log the images
-        display (bool): whether to display the images
-    """
-
-    assert (
-        len(batch_obs_images)
-        == len(batch_goal_images)
-        == len(batch_pred_waypoints)
-        == len(batch_label_waypoints)
-    )
-
-    visualize_path = None
-    if save_folder is not None:
-        visualize_path = os.path.join(
-            save_folder, "visualize", mode, f"epoch{epoch}", "action_prediction"
-        )
-
-    if not os.path.exists(visualize_path):
-        os.makedirs(visualize_path)
-
-    batch_size = batch_obs_images.shape[0]
-    wandb_list = []
-
-    for i in range(min(batch_size, num_images_preds)):
-        obs_img = np2img(batch_obs_images[i])
-        goal_img = np2img(batch_goal_images[i])
-        pred_waypoints = batch_pred_waypoints[i]
-        label_waypoints = batch_label_waypoints[i]
-        obs_feature = obs_features[i]
-        obs_feature_grad = obs_features_grads[i]
-
-        save_path = None
-        if visualize_path is not None:
-            save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
-
-        draw_GOAL(
-            obs_img,
-            goal_img,
-            pred_waypoints,
-            label_waypoints,
-            obs_feature,
-            obs_feature_grad,
-            save_path,
-            display,
-        )
-        if use_wandb:
-            wandb_list.append(wandb.Image(save_path))
-    if use_wandb:
-        wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
-
-def draw_GOAL(
-    obs_img,
-    goal_img,
-    pred_waypoints: np.ndarray,
-    label_waypoints: np.ndarray,
-    obs_feature: np.ndarray,
-    obs_feature_grad: Optional[np.ndarray],
-    save_path: Optional[str] = None,
-    display: Optional[bool] = False,
-):
-    """
-    使用Grad-CAM生成热力图，并显示当前观测图和目标图，同时绘制预测轨迹和标注轨迹.
-
-    Args:
-        obs_img: 观测图 (PIL Image)
-        goal_img: 目标图 (PIL Image)
-        dataset_name: 数据集名称
-        pred_waypoints: 预测轨迹 [N, 2]
-        label_waypoints: 标注轨迹 [N, 2]
-        obs_feature: 观测图特征图 (C, H, W)
-        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
-        save_path: 保存图像的路径
-        display: 是否显示图像
-    """
-    features = (
-        obs_feature
-        if isinstance(obs_feature, np.ndarray)
-        else obs_feature.detach().cpu().numpy()
-        )
-    
-    if obs_feature_grad is not None:
-        grads = (
-            obs_feature_grad
-            if isinstance(obs_feature_grad, np.ndarray)
-            else obs_feature_grad.detach().cpu().numpy()
-        )
-    else:
-        print(f"未能获取有效梯度信息，采用简单平均作为热力图。")
-        grads = np.ones_like(features)
-
-    # 计算Grad-CAM热力图 (H, W)
-    cam = compute_gradcam_heatmap(features, grads)
-    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-
-    # 叠加热力图到观测图
-    obs_img_np = np.array(obs_img)
-    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
-
-    # 绘制预测轨迹和标注轨迹，并显示目标图
-    fig, ax = plt.subplots(1, 2, figsize=(18.5, 10.5))
-
-    plot_trajs_and_points(
-        ax[0],
-        [pred_waypoints, label_waypoints],
-        traj_colors=[CYAN, MAGENTA],
-    )
-    ax[0].set_title("Action Prediction")
-
-    ax[1].imshow(heatmap_img)
-    ax[1].set_title("Current with Grad-CAM")
 
     if save_path is not None:
         fig.savefig(save_path, bbox_inches="tight")

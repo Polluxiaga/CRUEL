@@ -38,12 +38,6 @@ normalize: True
 context_type: temporal
 context_size: 5
 
-# distance bounds for distance and action and distance predictions 
-action:
-  min_dist_cat: 0
-  max_dist_cat: 10
-close_far_threshold: 10 # distance threshold used to seperate the close and the far subgoals that are sampled per datapoint
-
 # action output params
 len_traj_pred: 2
 
@@ -53,13 +47,10 @@ obs_type: "image"
 goal_type: "image"
 
 datasets:
-  # seattle:
-  #   data_folder: /home/<username>/vint_dataset/seattle/
-  #   train: /home/<username>/data_splits/seattle/train/
-  #   test: /home/<username>/data_splits/seattle/test/
-  #   end_slack: 0
-  #   goals_per_obs: 1
-  #   negative_mining: True
+  debugdata:
+    data_folder: /home/yzc/CRUEL/debugdata
+    train: /home/yzc/CRUEL/debugdata_splits/train/
+    test: /home/yzc/CRUEL/debugdata_splits/test/
 
   ourdata:
     data_folder: /home/yzc/CRUEL/ourdata
@@ -68,9 +59,6 @@ datasets:
     # data_folder: /Users/pollux/Documents/Robot_Navigation/CRUEL/ourdata
     # train: /Users/pollux/Documents/Robot_Navigation/CRUEL/ourdata_splits/train/ #data_splits_folder
     # test: /Users/pollux/Documents/Robot_Navigation/CRUEL/ourdata_splits/test/ #data_splits_folder
-    end_slack: 0
-    goals_per_obs: 3
-    negative_mining: False
 
 # logging stuff
 ## =0 turns off
