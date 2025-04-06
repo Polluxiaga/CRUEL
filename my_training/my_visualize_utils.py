@@ -7,7 +7,7 @@ from typing import Optional
 import wandb
 import seaborn as sns
 
-VIZ_IMAGE_SIZE = (640, 480)
+VIZ_IMAGE_SIZE = (700, 400)
 RED = np.array([1, 0, 0])
 GREEN = np.array([0, 1, 0])
 BLUE = np.array([0, 0, 1])
@@ -92,10 +92,9 @@ def bc_visualize(
     obs_features_grads: np.ndarray,
     attention_scores: np.ndarray,
     mode: str,
-    normalized: bool,
     save_folder: str,
     epoch: int,
-    num_images_preds: int = 8,
+    num_images_log: int = 8,
     use_wandb: bool = True,
     display: bool = False,
 ):
@@ -136,7 +135,7 @@ def bc_visualize(
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
 
-    for i in range(min(batch_size, num_images_preds)):
+    for i in range(min(batch_size, num_images_log)):
         obs_img = np2img(batch_obs_images[i])
         pred_waypoints = batch_pred_waypoints[i]
         label_waypoints = batch_label_waypoints[i]
@@ -193,15 +192,11 @@ def bc_draw(
         else obs_feature.detach().cpu().numpy()
     )
     
-    if obs_feature_grad is not None:
-        grads = (
-            obs_feature_grad
-            if isinstance(obs_feature_grad, np.ndarray)
-            else obs_feature_grad.detach().cpu().numpy()
-        )
-    else:
-        print("未能获取有效梯度信息，采用简单平均作为热力图。")
-        grads = np.ones_like(features)
+    grads = (
+        obs_feature_grad
+        if isinstance(obs_feature_grad, np.ndarray)
+        else obs_feature_grad.detach().cpu().numpy()
+    )
 
     # 计算Grad-CAM热力图 (H, W)
     cam = compute_gradcam_heatmap(features, grads)
@@ -213,8 +208,12 @@ def bc_draw(
     obs_img_np = np.array(obs_img)
     heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
 
+    # 获取原图宽高比
+    img_height, img_width = obs_img_np.shape[:2]
+    aspect_ratio = img_width / img_height
+
     # 绘制预测轨迹和标注轨迹
-    fig, ax = plt.subplots(1, 3, figsize=(18.5, 10.5))
+    fig, ax = plt.subplots(1, 3, figsize=(17.5, 17.5 / aspect_ratio))
 
     plot_trajs_and_points(
         ax[0],
