@@ -118,12 +118,15 @@ class bc(nn.Module):
         else:
             self.compress_obs_enc = nn.Identity()
 
+        # 添加1x1卷积层用于生成注意力图
+        self.gaze_conv = nn.Conv2d(self.num_obs_features, 1, kernel_size=1)
+
         self.decoder = None
         self.action_predictor = nn.Sequential(
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
         )
 
-    def forward(self, obs_img: torch.tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs_img: torch.tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         #  第一次forward时初始化解码器
         if self.decoder is None:
             # 获取一个样本的特征图大小
@@ -150,7 +153,7 @@ class bc(nn.Module):
 
         # 1. 获取所需层特征并注册hook（用于辅助任务）
         def get_requested_features(module, input, output):
-            raw_obs_features = output  # [N, 40, H/8, W/8]
+            raw_obs_features = output  # [N, channel_num, H/32, W/32]
             raw_obs_features.retain_grad()
             raw_obs_features.register_hook(self._capture_obs_features_grad)
             
@@ -160,10 +163,10 @@ class bc(nn.Module):
             self._raw_obs_features = raw_obs_features.view(
                 self.context_size + 1,
                 batch_size,
-                raw_obs_features.shape[1],  # 40 channels
-                raw_obs_features.shape[2],  # H/8
-                raw_obs_features.shape[3]   # W/8
-            )  # [context_size+1, batch_size, 40, H/8, W/8]
+                raw_obs_features.shape[1],  # channel_num
+                raw_obs_features.shape[2],  # H/32
+                raw_obs_features.shape[3]   # W/32
+            )  # [context_size+1, batch_size, channel_num, H/32, W/32]
 
         # 注册任意层的hook
         requested_layer = list(self.obs_encoder._blocks)[-1]  # 获取H/8分辨率的中间层
@@ -172,6 +175,21 @@ class bc(nn.Module):
         # 2. 正常前向传播，获取最终的全局特征
         obs_features = self.obs_encoder.extract_features(obs_img)  # [N, 1280, H/32, W/32]
         N, C, H, W = obs_features.shape  # N = batch_size * (context_size+1)
+        
+        # 生成gaze_use_map
+        gaze_use_map = self.gaze_conv(obs_features)  # [N, 1, H/32, W/32]
+        
+        # 重塑为所需维度
+        gaze_use_map = gaze_use_map.view(
+            self.context_size + 1,
+            -1,  # batch_size
+            1,   # channel
+            H * W,   # H/32 * W/32
+        ).squeeze(2)  # [context_size+1, batch_size, H/32 * W/32]
+        gaze_use_map = gaze_use_map.permute(1, 0, 2) # [batch_size, context_size+1, H/32 * W/32]
+        gaze_use_map = gaze_use_map.reshape(-1, (self.context_size+1)*H*W) # [batch_size, (context_size+1)*H/32*W/32]
+        
+        # 继续原有的处理流程
         obs_encoding = obs_features.permute(0, 2, 3, 1)  # [N, H/32, W/32, 1280]
         obs_encoding = obs_encoding.reshape(N, H*W, C)  # [N, H/32*W/32, 1280]
 
@@ -203,7 +221,7 @@ class bc(nn.Module):
         handle.remove()
 
         # 返回预测结果和中间特征
-        return action_pred, self._raw_obs_features, attention_scores
+        return action_pred, self._raw_obs_features, attention_scores, gaze_use_map
 
     @torch.utils.hooks.unserializable_hook
     def _capture_obs_features_grad(self, grad):

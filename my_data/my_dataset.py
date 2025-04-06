@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import os
 import pickle
 from typing import Tuple
@@ -165,8 +166,23 @@ class bc_dataset(Dataset):
                 image_bytes = bytes(image_buffer)
             image_bytes = io.BytesIO(image_bytes)
             return img_path_to_data(image_bytes, self.image_size)
-        except TypeError:
-            print(f"Failed to load image {image_path}")
+        except Exception as e:
+            print(f"Failed to load image {image_path}: {e}")
+
+
+    def _load_gaze(self, trajectory_name, time):
+        """
+        Load gaze attention data from pkl file
+        """
+        pkl_path = get_data_path(self.data_folder, trajectory_name, time).replace('.jpg', '.pkl')
+        try:
+            # 使用 pandas 正确读取 DataFrame 类型的 pkl
+            df = pd.read_pickle(pkl_path)
+            gaze_data = torch.tensor(df.to_numpy(), dtype=torch.float32)
+            return gaze_data
+        except Exception as e:
+            print(f"Failed to load gaze data {pkl_path}: {e}")
+            return None
 
 
     def _compute_actions(self, traj_data, curr_time):
@@ -194,18 +210,19 @@ class bc_dataset(Dataset):
         Args:
             i (int): index to ith datapoint
         Returns:
-            Tuple of tensors containing the context, observation and action label
+            Tuple of tensors containing the context, observation, gaze attention and action label
                 obs_image (torch.Tensor): tensor of shape [3, H, W] containing the image of the robot's observation
-                action_label (torch.Tensor): tensor of shape (3, 2) containing the action labels from the observation to the goal
+                gaze_attention (torch.Tensor): tensor of shape [N] containing the gaze attention data
+                action_label (torch.Tensor): tensor of shape (3, 2) containing the action labels
         """
         f_curr, curr_time = self.samples_index[i]
 
-        # Load images
-        obs_context = []
+        # Load images and gaze data
         obs_times = [curr_time + i for i in range(-self.context_size, 1)]
         obs_context = [(f_curr, t) for t in obs_times]
 
         obs_image = torch.cat([self._load_image(f, t) for f, t in obs_context])
+        gaze_attention = torch.cat([self._load_gaze(f, t) for f, t in obs_context])
 
         # Load trajectory data
         curr_traj_data = self._get_trajectory(f_curr)
@@ -217,5 +234,6 @@ class bc_dataset(Dataset):
         
         return (
             torch.as_tensor(obs_image, dtype=torch.float32),
+            torch.as_tensor(gaze_attention, dtype=torch.float32),
             torch.as_tensor(actions, dtype=torch.float32)
         )

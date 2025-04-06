@@ -70,33 +70,43 @@ class Logger:
 def compute_losses(
     action_label: torch.Tensor,
     action_pred: torch.Tensor,
+    gaze_map: torch.Tensor,
+    gaze_use_map: torch.Tensor,
 ):
     """
-    Compute losses for action prediction.
-
+    Compute losses for action prediction and gaze attention.
     """
     def action_reduce(unreduced_loss: torch.Tensor):
-        # Reduce over non-batch dimensions to get loss per batch element
         while unreduced_loss.dim() > 1:
             unreduced_loss = unreduced_loss.mean(dim=-1)
         return (unreduced_loss).mean()
 
+    # Action prediction loss
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
     action_loss = action_reduce(F.mse_loss(action_pred, action_label, reduction="none"))
 
+    # Cosine similarity metric
     action_waypts_cos_similarity = action_reduce(F.cosine_similarity(
         action_pred, action_label, dim=-1
     ))
-    multi_action_waypts_cos_sim = action_reduce(F.cosine_similarity(
-        torch.flatten(action_pred, start_dim=1),
-        torch.flatten(action_label, start_dim=1),
-        dim=-1,
-    ))
+
+    # Gaze attention auxiliary loss (KL divergence)
+    auxiliary_loss = F.kl_div(
+        F.log_softmax(gaze_use_map, dim=1),
+        F.softmax(gaze_map, dim=1),
+        reduction='batchmean',
+        log_target=False,
+    )
+
+    # Combine losses with weight
+    alpha = 0.2
+    total_loss = (1 - alpha) * action_loss + alpha * auxiliary_loss
 
     results = {
         "action_loss": action_loss,
+        "auxiliary_loss": auxiliary_loss,
+        "total_loss": total_loss,
         "action_waypts_cos_sim": action_waypts_cos_similarity,
-        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim,
     }
     return results
 
@@ -142,17 +152,16 @@ def bc_log_data(
 
     if image_log_freq != 0 and i % image_log_freq == 0:
         bc_visualize(
-            ts2np(obs_image),
-            ts2np(action_pred),
-            ts2np(action_label),
-            ts2np(obs_features),
-            ts2np(obs_features_grad),
-            ts2np(attention_scores),
-            mode,
-            normalized,
-            run_folder,
-            epoch,
-            num_images_log,
+            batch_obs_images=ts2np(obs_image),
+            batch_pred_waypoints=ts2np(action_pred),
+            batch_label_waypoints=ts2np(action_label),
+            obs_features=ts2np(obs_features),
+            obs_features_grads=ts2np(obs_features_grad),
+            attention_scores=ts2np(attention_scores),
+            mode=mode,
+            save_folder=run_folder,
+            epoch=epoch,
+            num_images_log=num_images_log,
             use_wandb=use_wandb,
         )
 
@@ -192,12 +201,15 @@ def bc_train(
     """
     model.train()
     action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
+    auxiliary_loss_logger = Logger("auxiliary_loss", "train", window_size=print_log_freq)
+    total_loss_logger = Logger("total_loss", "train", window_size=print_log_freq)
     action_waypts_cos_sim_logger = Logger("action_waypts_cos_sim", "train", window_size=print_log_freq)
-    multi_action_waypts_cos_sim_logger = Logger("multi_action_waypts_cos_sim", "train", window_size=print_log_freq)
+    
     loggers = {
         "action_loss": action_loss_logger,
+        "auxiliary_loss": auxiliary_loss_logger,
+        "total_loss": total_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
-        "multi_action_waypts_cos_sim": multi_action_waypts_cos_sim_logger,
     }
 
     num_batches = len(dataloader)
@@ -209,24 +221,27 @@ def bc_train(
     )
     for i, data in enumerate(tqdm_iter):
         (
-            obs_image,
+            obs_image, # [batch_size, 3 * (context_size+1), H, W]
+            gaze_attention, # [batch_size, (context_size+1) * H/32 * W/32] 
             action_label,
         ) = data
 
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE)
+        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
 
+        gaze_attention = gaze_attention.to(device).squeeze(-1)
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
       
-        action_pred, obs_features, attention_scores = model(obs_image)
+        action_pred, obs_features, attention_scores, gaze_use_map = model(obs_image)
+        assert gaze_attention.shape == gaze_use_map.shape, f"Shape mismatch: gaze_attention {gaze_attention.shape} != gaze_use_map {gaze_use_map.shape}"
 
-        losses = compute_losses(action_label=action_label, action_pred=action_pred)
+        losses = compute_losses(action_label=action_label, action_pred=action_pred, gaze_map=gaze_attention, gaze_use_map=gaze_use_map)
 
-        losses["action_loss"].backward()
+        losses["total_loss"].backward()
 
         # 取回obs_features的梯度
         obs_features_grad = model._grad_obs_features
@@ -264,12 +279,12 @@ def bc_train(
             obs_features_grad=viz_obs_feature_grad,
             attention_scores=attention_scores,
             action_label=action_label,
-            wandb_log_freq=wandb_log_freq,
-            print_log_freq=print_log_freq,
-            image_log_freq=image_log_freq,
             use_wandb=use_wandb,
             mode="train",
             use_latest=True,
+            wandb_log_freq=wandb_log_freq,
+            print_log_freq=print_log_freq,
+            image_log_freq=image_log_freq,
         )
         print(f"Current learning rate: {optimizer.param_groups[0]['lr']}")
 
@@ -297,8 +312,9 @@ def bc_evaluate(
     # 初始化日志器
     loggers = {
         "action_loss": Logger("action_loss", "test"),
+        "auxiliary_loss": Logger("auxiliary_loss", "test"),
+        "total_loss": Logger("total_loss", "test"),
         "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "multi_action_waypts_cos_sim": Logger("multi_action_waypts_cos_sim", "test"),
     }
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
@@ -315,24 +331,24 @@ def bc_evaluate(
     )
 
     for i, data in enumerate(tqdm_iter):
-        obs_image, action_label = data
+        obs_image, gaze_attention, action_label = data
 
         # 图像分割通道并处理
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE)
-
+        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
         # 确保输入开启梯度追踪
         obs_image.requires_grad_(True)
 
+        gaze_attention = gaze_attention.to(device).squeeze(-1)
         action_label = action_label.to(device)
 
         # 前向推理
-        action_pred, _, _ = model(obs_image)
+        action_pred, _, _, gaze_use_map = model(obs_image)
 
         # 计算损失并记录（注意：此处直接用 .item() 记录数值）
-        losses = compute_losses(action_label=action_label, action_pred=action_pred)
+        losses = compute_losses(action_label=action_label, action_pred=action_pred, gaze_map=gaze_attention, gaze_use_map=gaze_use_map)
         for key, value in losses.items():
             if key in loggers:
                 loggers[key].log_data(value.item())
@@ -348,11 +364,11 @@ def bc_evaluate(
 
         with torch.enable_grad():
             # 重新前向推理，并获取特征图和梯度
-            action_pred, obs_features, attention_scores = model(obs_image)
+            action_pred, obs_features, attention_scores, gaze_use_map= model(obs_image)
 
             # 计算损失并回传梯度
-            loss = compute_losses(action_label=action_label, action_pred=action_pred)["action_loss"]
-            loss.backward()
+            loss = compute_losses(action_label=action_label, action_pred=action_pred, gaze_map=gaze_attention, gaze_use_map=gaze_use_map)
+            loss["total_loss"].backward()
             
             # 取回obs_features的梯度
             obs_features_grad = model._grad_obs_features

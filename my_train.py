@@ -57,13 +57,13 @@ def main(config):
     train_dataset = []
     test_dataset = []
     method = config["method"]
-    data_config = config["datasets"]["debugdata"]
+    data_config = config["datasets"]["ourdata"]
     for data_split_type in ["train", "test"]:
         if method == "BC":
             dataset = bc_dataset(
                 data_folder=data_config["data_folder"],
                 data_split_folder=data_config[data_split_type],
-                dataset_name="debugdata",
+                dataset_name="ourdata",
                 image_size=config["image_size"],
                 len_traj_pred=config["len_traj_pred"],
                 context_size=config["context_size"],

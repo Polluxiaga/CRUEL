@@ -1,7 +1,6 @@
 my_logs/*
 wandb/*
-my_scand/*
-my_scand_splits/*
+manual_gaze_csv/*
 ourdata/*
 ourdata_splits/*
 debugdata/*
