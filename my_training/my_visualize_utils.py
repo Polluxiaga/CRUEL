@@ -109,7 +109,6 @@ def bc_visualize(
         batch_label_waypoints (np.ndarray): batch of label waypoints [batch_size, learn_traj_pred, 2]
         obs_features (np.ndarray): batch of observation features [batch_size*(context_size+1), num_features, height, width]
         eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
-        normalized (bool): whether the waypoints are normalized
         save_folder (str): folder to save the images. If None, will not save the images
         epoch (int): current epoch number
         num_images_preds (int): number of images to visualize

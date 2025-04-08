@@ -16,7 +16,7 @@ from my_data.my_data_utils import (
 )
 
 
-class bc_dataset(Dataset):
+class gaze_dataset(Dataset):
     def __init__(
         self,
         data_folder: str,

@@ -13,14 +13,14 @@ from torchvision import transforms
 import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
-from my_data.my_dataset import bc_dataset
-from my_model.base import bc
+from my_data.my_dataset import gaze_dataset
+from my_model.base import base_model, cnnaux_model
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
 def main(config):
 
-    torch.set_num_threads(16)
+    torch.set_num_threads(10)
     
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -59,20 +59,20 @@ def main(config):
     method = config["method"]
     data_config = config["datasets"]["ourdata"]
     for data_split_type in ["train", "test"]:
-        if method == "BC":
-            dataset = bc_dataset(
-                data_folder=data_config["data_folder"],
-                data_split_folder=data_config[data_split_type],
-                dataset_name="ourdata",
-                image_size=config["image_size"],
-                len_traj_pred=config["len_traj_pred"],
-                context_size=config["context_size"],
-                obs_type=config["obs_type"],
-            )
+        dataset = gaze_dataset(
+            data_folder=data_config["data_folder"],
+            data_split_folder=data_config[data_split_type],
+            dataset_name="ourdata",
+            image_size=config["image_size"],
+            len_traj_pred=config["len_traj_pred"],
+            context_size=config["context_size"],
+            obs_type=config["obs_type"],
+        )
         if data_split_type == "train":
             train_dataset.append(dataset)
         else:
             test_dataset.append(dataset)
+
 
     train_dataset = ConcatDataset(train_dataset)
     train_loader = DataLoader(
@@ -97,8 +97,18 @@ def main(config):
 
 
     # Create the model
-    if config["model_type"] == "vint" and method == "BC":
-        model = bc(
+    if config["model_type"] == "vint" and (method == "base" or method == "tokenaux"):
+        model = base_model(
+            context_size=config["context_size"],
+            len_traj_pred=config["len_traj_pred"],
+            encoder=config["obs_encoder"],
+            encoding_size=config["encoding_size"],
+            mha_num_attention_heads=config["mha_num_attention_heads"],
+            mha_num_attention_layers=config["mha_num_attention_layers"],
+            mha_ff_dim_factor=config["mha_ff_dim_factor"],
+        )
+    elif config["model_type"] == "vint" and method == "cnnaux":
+        model = cnnaux_model(
             context_size=config["context_size"],
             len_traj_pred=config["len_traj_pred"],
             encoder=config["obs_encoder"],
@@ -214,7 +224,6 @@ def main(config):
         epochs=config["epochs"],
         device=device,
         run_folder=config["run_folder"],
-        normalized=config["normalize"],
         wandb_log_freq=config["wandb_log_freq"],
         print_log_freq=config["print_log_freq"],
         image_log_freq=config["image_log_freq"],
