@@ -3,7 +3,7 @@ import os
 from typing import Optional
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import bc_train, bc_evaluate
+from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate
 
 import torch
 import torch.nn as nn
@@ -24,7 +24,6 @@ def train_eval_loop(
     epochs: int,
     device: torch.device,
     run_folder: str,
-    normalized: bool,
     wandb_log_freq: int = 1,
     print_log_freq: int = 1,
     image_log_freq: int = 1,
@@ -47,7 +46,6 @@ def train_eval_loop(
         epochs: number of epochs to train
         device: device to train on
         run_folder: folder to save checkpoints and logs
-        normalized: whether to normalize the action space or not
         wandb_log_freq: frequency of logging to wandb
         print_log_freq: frequency of printing to console
         image_log_freq: frequency of logging images to wandb
@@ -63,15 +61,44 @@ def train_eval_loop(
             print(
                 f"Start ViNT Training Epoch {epoch}/{epochs - 1}"
             )
-            if train_method == "BC":
-                bc_train(
+            if train_method == "base":
+                base_train(
                     model=model,
                     optimizer=optimizer,
                     dataloader=train_loader,
                     transform=transform,
                     device=device,
                     run_folder=run_folder,
-                    normalized=normalized,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "cnnaux":
+                cnnaux_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "tokenaux":
+                tokenaux_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
                     epoch=epoch,
                     print_log_freq=print_log_freq,
                     wandb_log_freq=wandb_log_freq,
@@ -84,14 +111,37 @@ def train_eval_loop(
         print(
             f"Start ViNT Testing Epoch {epoch}/{current_epoch + epochs - 1}"
         )
-        if train_method == "BC":
-            action_test_loss = bc_evaluate(
+        if train_method == "base":
+            action_test_loss = base_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
                 device=device,
                 run_folder=run_folder,
-                normalized=normalized,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "cnnaux":
+            action_test_loss = cnnaux_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "tokenaux":
+            action_test_loss = tokenaux_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
                 epoch=epoch,
                 num_images_log=num_images_log,
                 use_wandb=use_wandb,
