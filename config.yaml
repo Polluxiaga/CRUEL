@@ -1,22 +1,22 @@
 project_name: my_vint
 run_name: vint
-# load_run: "my_vint/vint_2025_04_07_15_03_44"
-# run_id: "kw368kn2"
+# load_run: "my_vint/vint_2025_04_09_00_47_49"
+# run_id: "28bzh5w3"
 
 # training setup
 method: "base" # base or cnnaux or tokenaux
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
-batch_size: 128
-epochs: 50
-gpu_ids: [0]
-num_workers: 8
+batch_size: 32
+epochs: 37
+gpu_id: 1
+num_workers: 1
 lr: 5e-4
 optimizer: adamw
 clipping: False
 max_norm: 1.
 scheduler: "cosine"
-warmup: True 
+warmup: True  
 warmup_epochs: 0
 cyclic_period: 10
 plateau_patience: 3
@@ -62,10 +62,10 @@ datasets:
 
 # logging stuff
 ## =0 turns off
-print_log_freq: 5 # in iterations
-image_log_freq: 8 # in iterations
+print_log_freq: 50 # in iterations
+image_log_freq: 50 # in iterations
 num_images_log: 6 #0 
 pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
-wandb_log_freq: 5 # in iterations
+wandb_log_freq: 50 # in iterations
 eval_freq: 1 # in epochs
