@@ -17,6 +17,9 @@ from my_data.my_data_utils import (
 
 
 class gaze_dataset(Dataset):
+    # Class-level flag to track if caches are built
+    _caches_built = {}
+
     def __init__(
         self,
         data_folder: str,
@@ -60,18 +63,40 @@ class gaze_dataset(Dataset):
 
         self.trajectory_cache = {}
         self._load_index()
-        self._build_caches()
+        
+        # Use cache path as unique key for tracking built status
+        self._cache_path = os.path.join(
+            self.data_split_folder,
+            f"{self.dataset_name}_images.lmdb",
+        )
+        
+        # Only build caches if not already built for this cache path
+        if self._cache_path not in self._caches_built:
+            self._build_caches()
+            self._caches_built[self._cache_path] = True
+        
+        # Always open the LMDB environment
+        self._open_cache()
 
+    def _open_cache(self):
+        """Open the LMDB environment in read-only mode"""
+        self._image_cache = lmdb.open(self._cache_path, readonly=True, max_readers=256, lock=False)
+
+    def __del__(self):
+        """Clean up LMDB resources"""
+        if hasattr(self, '_image_cache'):
+            self._image_cache.close()
 
     def __getstate__(self):
+        """Handle pickling"""
         state = self.__dict__.copy()
         state["_image_cache"] = None
         return state
     
     def __setstate__(self, state):
+        """Handle unpickling"""
         self.__dict__ = state
-        self._build_caches()
-
+        self._open_cache()
 
     def _get_trajectory(self, trajectory_name):
         if trajectory_name in self.trajectory_cache:
@@ -127,35 +152,28 @@ class gaze_dataset(Dataset):
         """
         Build a cache of images for faster loading using LMDB
         """
-        cache_filename = os.path.join(
-            self.data_split_folder,
-            f"{self.dataset_name}_images.lmdb",
-        )
+        # If cache already exists, skip building
+        if os.path.exists(self._cache_path):
+            return
 
-        # Load all the trajectories into memory. These should already be loaded, but just in case.
+        # Load all the trajectories into memory
         for traj_name in self.traj_names:
             self._get_trajectory(traj_name)
 
-        """
-        If the cache file doesn't exist, create it by iterating through the dataset and writing each image to the cache
-        """
-        if not os.path.exists(cache_filename):
-            tqdm_iterator = tqdm.tqdm(
-                self.goals_index,
-                disable=not use_tqdm,
-                dynamic_ncols=True,
-                desc=f"Building LMDB cache for {self.dataset_name}"
-            )
-            with lmdb.open(cache_filename, map_size=2**40) as image_cache:
-                with image_cache.begin(write=True) as txn:
-                    for traj_name, time in tqdm_iterator:
-                        image_path = get_data_path(self.data_folder, traj_name, time)
-                        with open(image_path, "rb") as f:
-                            txn.put(image_path.encode(), f.read())
+        tqdm_iterator = tqdm.tqdm(
+            self.goals_index,
+            disable=not use_tqdm,
+            dynamic_ncols=True,
+            desc=f"Building LMDB cache for {self.dataset_name}"
+        )
 
-        # Reopen the cache file in read-only mode
-        self._image_cache: lmdb.Environment = lmdb.open(cache_filename, readonly=True)
-
+        # Create new cache if it doesn't exist
+        with lmdb.open(self._cache_path, map_size=2**40) as image_cache:
+            with image_cache.begin(write=True) as txn:
+                for traj_name, time in tqdm_iterator:
+                    image_path = get_data_path(self.data_folder, traj_name, time)
+                    with open(image_path, "rb") as f:
+                        txn.put(image_path.encode(), f.read())
 
     def _load_image(self, trajectory_name, time):
         image_path = get_data_path(self.data_folder, trajectory_name, time)

@@ -1,12 +1,31 @@
 import os
-import wandb
 import argparse
-import numpy as np
 import yaml
+import wandb
+import numpy as np
 import time
 
+# 解析命令行参数
+parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
+parser.add_argument("--config", "-c", default="config.yaml", help="Path to config file")
+args = parser.parse_args()
+
+# 加载配置文件
+with open("config.yaml", "r") as f:
+    default_config = yaml.safe_load(f)
+config = default_config.copy()
+with open(args.config, "r") as f:
+    user_config = yaml.safe_load(f)
+config.update(user_config)
+
+# 强制设置GPU可见性（不检查CUDA是否可用）
+if "gpu_id" in config:
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(config["gpu_id"])
+    print(f"强制将物理GPU {config['gpu_id']} 映射为逻辑GPU 0")
+
+# 现在导入PyTorch及相关模块
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim import Adam, AdamW
 from torchvision import transforms
@@ -20,24 +39,9 @@ from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 def main(config):
 
-    torch.set_num_threads(10)
+    torch.set_num_threads(4)
     
-    if torch.cuda.is_available():
-        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        if "gpu_ids" not in config:
-            config["gpu_ids"] = [0]
-        elif type(config["gpu_ids"]) == int:
-            config["gpu_ids"] = [config["gpu_ids"]]
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-            [str(x) for x in config["gpu_ids"]]
-        )
-        print("Using cuda devices:", os.environ["CUDA_VISIBLE_DEVICES"])
-    else:
-        print("Using cpu")
-    first_gpu_id = config["gpu_ids"][0]
-    device = torch.device(
-        f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
     if "seed" in config:
@@ -192,17 +196,6 @@ def main(config):
         load_model(model, latest_checkpoint)
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
-
-
-    # Multi-GPU
-    if len(config["gpu_ids"]) > 1:
-        model = nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[first_gpu_id],
-        output_device=first_gpu_id,
-        find_unused_parameters=True  # 重要！
-    )
-    model = model.to(device)
 
 
     if "load_run" in config:  # load optimizer and scheduler after data parallel

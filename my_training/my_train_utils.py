@@ -179,6 +179,7 @@ def base_train(
         use_wandb: whether to use wandb
         use_tqdm: whether to use tqdm
     """
+    model = model.to(device)
     model.train()
     action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
     action_waypts_cos_sim_logger = Logger("action_waypts_cos_sim", "train", window_size=print_log_freq)
@@ -279,6 +280,7 @@ def base_evaluate(
     """
 
     # 设置模型为评估模式
+    model = model.to(device)
     model.eval()
 
     # 初始化日志器
@@ -459,6 +461,7 @@ def cnnaux_train(
         use_wandb: whether to use wandb
         use_tqdm: whether to use tqdm
     """
+    model = model.to(device)
     model.train()
     action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
     auxiliary_loss_logger = Logger("auxiliary_loss", "train", window_size=print_log_freq)
@@ -565,6 +568,7 @@ def cnnaux_evaluate(
     """
 
     # 设置模型为评估模式
+    model = model.to(device)
     model.eval()
 
     # 初始化日志器
@@ -717,7 +721,7 @@ def compute_tokenaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 0.2
+    alpha = 0.4
     total_loss = (1 - alpha) * action_loss + alpha * token_aux_loss
 
     results = {
@@ -761,6 +765,8 @@ def tokenaux_train(
         use_wandb: whether to use wandb
         use_tqdm: whether to use tqdm
     """
+    model = model.to(device)
+    optimizer = Adam(model.parameters(), lr=...)
     model.train()
     action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
     auxiliary_loss_logger = Logger("auxiliary_loss", "train", window_size=print_log_freq)
@@ -871,6 +877,7 @@ def tokenaux_evaluate(
     """
 
     # 设置模型为评估模式
+    model = model.to(device)
     model.eval()
 
     # 初始化日志器
