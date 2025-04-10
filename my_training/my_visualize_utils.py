@@ -17,7 +17,24 @@ MAGENTA = np.array([1, 0, 1])
 
 
 def np2img(arr: np.ndarray) -> Image:
-    img = Image.fromarray(np.transpose(np.uint8(255 * arr), (1, 2, 0)))
+    """Convert numpy array to PIL Image.
+    
+    Args:
+        arr: numpy array of shape (C, H, W) or (H, W, C)
+        
+    Returns:
+        PIL Image of size VIZ_IMAGE_SIZE
+    """
+    # Check array shape
+    if len(arr.shape) != 3:
+        raise ValueError(f"Expected 3D array (C,H,W) or (H,W,C), got shape {arr.shape}")
+    
+    # If array is in (C,H,W) format, transpose to (H,W,C)
+    if arr.shape[0] == 3:  # Channels-first format
+        arr = np.transpose(arr, (1, 2, 0))
+    
+    # Convert to uint8 and create PIL Image
+    img = Image.fromarray(np.uint8(255 * arr))
     img = img.resize(VIZ_IMAGE_SIZE)
     return img
 
@@ -84,12 +101,89 @@ def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarr
     return cam       
 
 
+def bc_draw(
+    obs_imgs: list,  # List of 6 PIL Images
+    pred_waypoints: np.ndarray,
+    label_waypoints: np.ndarray,
+    obs_features: np.ndarray,  # [T, C, H, W]
+    obs_features_grad: Optional[np.ndarray],  # [T, C, H, W]
+    attention_scores: np.ndarray,
+    save_path: Optional[str] = None,
+    display: Optional[bool] = False,
+):
+    """
+    创建3x3的可视化布局:
+    - 第一行：轨迹预测(1列) + 注意力图(2-3列)
+    - 第二行和第三行：6张观测图的Grad-CAM热力图
+    """
+    # 创建3x3布局
+    fig, axes = plt.subplots(3, 3, figsize=(24, 24))
+    
+    # 第一行第一列：轨迹预测
+    plot_trajs_and_points(
+        axes[0, 0],
+        [pred_waypoints, label_waypoints],
+        traj_colors=[CYAN, MAGENTA],
+    )
+    axes[0, 0].set_title("Action Prediction")
+
+    # 第一行第二、三列：注意力图
+    attention_plot = sns.heatmap(
+        attention_scores, 
+        cmap="viridis", 
+        annot=False, 
+        fmt=".2f", 
+        ax=axes[0, 1:].ravel()[0],  # 跨两列显示
+        square=True
+    )
+    attention_plot.set_title("Attention Map")
+    axes[0, 2].remove()  # 移除多余的轴
+
+    # 第二行和第三行：6张Grad-CAM热力图
+    for idx, (img, feat, grad) in enumerate(zip(obs_imgs, obs_features, obs_features_grad)):
+        row = 1 + idx // 3  # 第二行开始
+        col = idx % 3       # 从左到右排列
+        
+        # 计算当前图像的Grad-CAM
+        cam = compute_gradcam_heatmap(feat, grad)
+        
+        # Convert PIL Image to numpy array
+        obs_img_np = np.array(img)
+        
+        # Get image dimensions
+        h, w = obs_img_np.shape[:2]
+        
+        # Resize CAM to match image dimensions
+        heatmap = cv2.resize(cam, (w, h))
+        heatmap = np.uint8(255 * heatmap)
+        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        
+        # Convert BGR to RGB (OpenCV uses BGR)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+        # 叠加热力图到观测图
+        heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
+        
+        # 显示叠加后的图像
+        axes[row, col].imshow(heatmap_img)
+        axes[row, col].set_title(f"Frame {idx+1} with Grad-CAM")
+        axes[row, col].axis('off')
+
+    plt.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=300)
+
+    if not display:
+        plt.close(fig)
+
+
 def bc_visualize(
-    batch_obs_images: np.ndarray,
+    batch_obs_images: np.ndarray,  # [B, T, 3, H, W]
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
-    obs_features: np.ndarray,
-    obs_features_grads: np.ndarray,
+    obs_features: np.ndarray,  # [B, T, C, H, W]
+    obs_features_grads: np.ndarray,  # [B, T, C, H, W]
     attention_scores: np.ndarray,
     mode: str,
     save_folder: str,
@@ -116,12 +210,6 @@ def bc_visualize(
         display (bool): whether to display the images
     """
 
-    assert (
-        len(batch_obs_images)
-        == len(batch_pred_waypoints)
-        == len(batch_label_waypoints)
-    )
-
     visualize_path = None
     if save_folder is not None:
         visualize_path = os.path.join(
@@ -133,13 +221,16 @@ def bc_visualize(
 
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
-
+    
     for i in range(min(batch_size, num_images_log)):
-        obs_img = np2img(batch_obs_images[i])
+        obs_imgs = []
+        for j in range(batch_obs_images.shape[1]):
+            obs_imgs.append(np2img(batch_obs_images[i][j]))  # T * [C, H, W]
+
         pred_waypoints = batch_pred_waypoints[i]
         label_waypoints = batch_label_waypoints[i]
-        obs_feature = obs_features[i]
-        obs_feature_grad = obs_features_grads[i]
+        features = obs_features[i]  # [T, C, H, W]
+        features_grad = obs_features_grads[i]  # [T, C, H, W]
         attention_score = attention_scores[i]
 
         save_path = None
@@ -147,11 +238,11 @@ def bc_visualize(
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
 
         bc_draw(
-            obs_img,
+            obs_imgs,
             pred_waypoints,
             label_waypoints,
-            obs_feature,
-            obs_feature_grad,
+            features,
+            features_grad,
             attention_score,
             save_path,
             display,
@@ -160,75 +251,3 @@ def bc_visualize(
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
         wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
-
-
-def bc_draw(
-    obs_img,
-    pred_waypoints: np.ndarray,
-    label_waypoints: np.ndarray,
-    obs_feature: np.ndarray,
-    obs_feature_grad: Optional[np.ndarray],
-    attention_scores: np.ndarray,
-    save_path: Optional[str] = None,
-    display: Optional[bool] = False,
-):
-    """
-    使用Grad-CAM加权特征生成热力图，并与观测图叠加，同时绘制预测轨迹和标注轨迹.
-
-    Args:
-        obs_img: PIL Image格式的观测图
-        dataset_name: 数据集名称
-        pred_waypoints: 预测轨迹，形状 [N,2]
-        label_waypoints: 标注轨迹，形状 [N,2]
-        obs_feature: 观测图对应的特征图 (C, H, W)
-        obs_feature_grad: 特征图的梯度信息，形状与obs_feature相同
-        save_path: 保存图像的路径
-        display: 是否显示图像
-    """
-    features = (
-        obs_feature
-        if isinstance(obs_feature, np.ndarray)
-        else obs_feature.detach().cpu().numpy()
-    )
-    
-    grads = (
-        obs_feature_grad
-        if isinstance(obs_feature_grad, np.ndarray)
-        else obs_feature_grad.detach().cpu().numpy()
-    )
-
-    # 计算Grad-CAM热力图 (H, W)
-    cam = compute_gradcam_heatmap(features, grads)
-    heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
-    heatmap = np.uint8(255 * (1 - heatmap))
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-
-    # 叠加热力图到观测图
-    obs_img_np = np.array(obs_img)
-    heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
-
-    # 获取原图宽高比
-    img_height, img_width = obs_img_np.shape[:2]
-    aspect_ratio = img_width / img_height
-
-    # 绘制预测轨迹和标注轨迹
-    fig, ax = plt.subplots(1, 3, figsize=(17.5, 17.5 / aspect_ratio))
-
-    plot_trajs_and_points(
-        ax[0],
-        [pred_waypoints, label_waypoints],
-        traj_colors=[CYAN, MAGENTA],
-    )
-    ax[0].set_title("Action Prediction")
-
-    ax[1].imshow(heatmap_img)
-    ax[1].set_title("Current with Grad-CAM")
-
-    sns.heatmap(attention_scores, cmap="viridis", annot=False, fmt=".2f", ax=ax[2], square=True)
-    ax[2].set_title("Attention Map")
-
-    if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
-
-    if not display:
-        plt.close(fig)

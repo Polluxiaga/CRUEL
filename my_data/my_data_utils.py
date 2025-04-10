@@ -14,8 +14,23 @@ IMAGE_ASPECT_RATIO = (
 )  # all images are centered cropped to a 7:4 aspect ratio in training
 
 
-def ts2np(tensor: torch.Tensor) -> np.ndarray:
-    return tensor.detach().cpu().numpy()
+def ts2np(tensor):
+    """Convert tensor, list of tensors, or numpy array to numpy array.
+    
+    Args:
+        tensor: torch.Tensor, list of torch.Tensor, or np.ndarray
+        
+    Returns:
+        np.ndarray: Converted numpy array
+    """
+    if isinstance(tensor, list):
+        return [ts2np(t) for t in tensor]
+    elif isinstance(tensor, torch.Tensor):
+        return tensor.detach().cpu().numpy()
+    elif isinstance(tensor, np.ndarray):
+        return tensor
+    else:
+        raise TypeError(f"Unsupported type for ts2np: {type(tensor)}")
 
 
 def get_data_path(data_folder: str, f: str, time: int, data_type: str = "image"):

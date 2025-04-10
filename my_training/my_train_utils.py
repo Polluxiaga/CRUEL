@@ -72,7 +72,7 @@ def bc_log_data(
     run_folder,
     num_images_log,
     loggers,
-    obs_image,
+    obs_images,
     action_pred,
     obs_features,
     obs_features_grad,
@@ -105,7 +105,7 @@ def bc_log_data(
 
     if image_log_freq != 0 and i % image_log_freq == 0:
         bc_visualize(
-            batch_obs_images=ts2np(obs_image),
+            batch_obs_images=ts2np(obs_images),
             batch_pred_waypoints=ts2np(action_pred),
             batch_label_waypoints=ts2np(action_label),
             obs_features=ts2np(obs_features),
@@ -203,8 +203,9 @@ def base_train(
             action_label,
         ) = data
 
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3]) # [batch_size, context_size+1, 3, H, W]
+
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
 
@@ -229,9 +230,6 @@ def base_train(
             obs_features.shape[3],
             obs_features.shape[4]
         )
-        # 选取最后一帧图像的特征图和梯度图
-        viz_obs_feature = obs_features[-1]
-        viz_obs_feature_grad = obs_features_grad[-1]
 
         optimizer.step()
 
@@ -247,10 +245,10 @@ def base_train(
             run_folder=run_folder,
             num_images_log=num_images_log,
             loggers=loggers,
-            obs_image=viz_obs_image,
+            obs_images=viz_obs_images,
             action_pred=action_pred,
-            obs_features=viz_obs_feature,
-            obs_features_grad=viz_obs_feature_grad,
+            obs_features=obs_features,
+            obs_features_grad=obs_features_grad,
             attention_scores=attention_scores,
             action_label=action_label,
             use_wandb=use_wandb,
@@ -306,9 +304,9 @@ def base_evaluate(
     for i, data in enumerate(tqdm_iter):
         obs_image, _, action_label = data
 
-        # 图像分割通道并处理
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
         # 确保输入开启梯度追踪
@@ -326,12 +324,12 @@ def base_evaluate(
                 loggers[key].log_data(value.item())
 
         # 保存最后一个batch的数据，用于后续Grad-CAM可视化
-        last_data = (obs_image, action_label, viz_obs_image, action_pred)
+        last_data = (obs_image, action_label, viz_obs_images, action_pred)
         
     # 第二部分：对最后一个batch生成Grad-CAM可视化（需要开启梯度）
     if last_data is not None:
         # 确保 obs_image 具有梯度追踪
-        obs_image, action_label, viz_obs_image, _ = last_data
+        obs_image, action_label, viz_obs_images, _ = last_data
         obs_image = obs_image.clone().detach().requires_grad_(True)
 
         with torch.enable_grad():
@@ -353,10 +351,6 @@ def base_evaluate(
                 obs_features.shape[3],
                 obs_features.shape[4]
             )
-
-            # 选取最后一帧图像的特征图和梯度图
-            viz_obs_feature = obs_features[-1]
-            viz_obs_feature_grad = obs_features_grad[-1]
             
             # 记录可视化和其他日志信息
             bc_log_data(
@@ -366,10 +360,10 @@ def base_evaluate(
                 run_folder=run_folder,
                 num_images_log=num_images_log,
                 loggers=loggers,
-                obs_image=viz_obs_image,
+                obs_images=viz_obs_images,
                 action_pred=action_pred,
-                obs_features=viz_obs_feature,
-                obs_features_grad=viz_obs_feature_grad,
+                obs_features=obs_features,
+                obs_features_grad=obs_features_grad,
                 attention_scores=attention_scores,
                 action_label=action_label,
                 use_wandb=use_wandb,
@@ -490,8 +484,9 @@ def cnnaux_train(
             action_label,
         ) = data
 
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3]) # [batch_size, context_size+1, 3, H, W]
+
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
 
@@ -518,9 +513,6 @@ def cnnaux_train(
             obs_features.shape[3],
             obs_features.shape[4]
         )
-        # 选取最后一帧图像的特征图和梯度图
-        viz_obs_feature = obs_features[-1]
-        viz_obs_feature_grad = obs_features_grad[-1]
 
         optimizer.step()
 
@@ -536,10 +528,10 @@ def cnnaux_train(
             run_folder=run_folder,
             num_images_log=num_images_log,
             loggers=loggers,
-            obs_image=viz_obs_image,
+            obs_images=viz_obs_images,
             action_pred=action_pred,
-            obs_features=viz_obs_feature,
-            obs_features_grad=viz_obs_feature_grad,
+            obs_features=obs_features,
+            obs_features_grad=obs_features_grad,
             attention_scores=attention_scores,
             action_label=action_label,
             use_wandb=use_wandb,
@@ -567,6 +559,7 @@ def cnnaux_evaluate(
     """
     Evaluate the model on the given evaluation dataset.
     """
+    device = torch.device("cpu")
 
     # 设置模型为评估模式
     model = model.to(device)
@@ -596,9 +589,9 @@ def cnnaux_evaluate(
     for i, data in enumerate(tqdm_iter):
         obs_image, gaze_attention, action_label = data
 
-        # 图像分割通道并处理
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
         # 确保输入开启梯度追踪
@@ -617,12 +610,12 @@ def cnnaux_evaluate(
                 loggers[key].log_data(value.item())
 
         # 保存最后一个batch的数据，用于后续Grad-CAM可视化
-        last_data = (obs_image, action_label, viz_obs_image, action_pred)
+        last_data = (obs_image, action_label, viz_obs_images, action_pred)
         
     # 第二部分：对最后一个batch生成Grad-CAM可视化（需要开启梯度）
     if last_data is not None:
         # 确保 obs_image 具有梯度追踪
-        obs_image, action_label, viz_obs_image, _ = last_data
+        obs_image, action_label, viz_obs_images, _ = last_data
         obs_image = obs_image.clone().detach().requires_grad_(True)
 
         with torch.enable_grad():
@@ -644,10 +637,6 @@ def cnnaux_evaluate(
                 obs_features.shape[3],
                 obs_features.shape[4]
             )
-
-            # 选取最后一帧图像的特征图和梯度图
-            viz_obs_feature = obs_features[-1]
-            viz_obs_feature_grad = obs_features_grad[-1]
             
             # 记录可视化和其他日志信息
             bc_log_data(
@@ -657,10 +646,10 @@ def cnnaux_evaluate(
                 run_folder=run_folder,
                 num_images_log=num_images_log,
                 loggers=loggers,
-                obs_image=viz_obs_image,
+                obs_images=viz_obs_images,
                 action_pred=action_pred,
-                obs_features=viz_obs_feature,
-                obs_features_grad=viz_obs_feature_grad,
+                obs_features=obs_features,
+                obs_features_grad=obs_features_grad,
                 attention_scores=attention_scores,
                 action_label=action_label,
                 use_wandb=use_wandb,
@@ -794,8 +783,9 @@ def tokenaux_train(
             action_label,
         ) = data
 
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
         obs_images = torch.split(obs_image, 3, dim=1)
-        viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
         obs_image = torch.cat(obs_images, dim=1)
 
@@ -826,9 +816,6 @@ def tokenaux_train(
             obs_features.shape[3],
             obs_features.shape[4]
         )
-        # 选取最后一帧图像的特征图和梯度图
-        viz_obs_feature = obs_features[-1]
-        viz_obs_feature_grad = obs_features_grad[-1]
 
         optimizer.step()
 
@@ -844,10 +831,10 @@ def tokenaux_train(
             run_folder=run_folder,
             num_images_log=num_images_log,
             loggers=loggers,
-            obs_image=viz_obs_image,
+            obs_images=viz_obs_images,
             action_pred=action_pred,
-            obs_features=viz_obs_feature,
-            obs_features_grad=viz_obs_feature_grad,
+            obs_features=obs_features,
+            obs_features_grad=obs_features_grad,
             attention_scores=attention_scores,
             action_label=action_label,
             use_wandb=use_wandb,
@@ -875,6 +862,7 @@ def tokenaux_evaluate(
     """
     Evaluate the model on the given evaluation dataset.
     """
+    device = torch.device("cpu")
 
     # 设置模型为评估模式
     model = model.to(device)
@@ -904,7 +892,8 @@ def tokenaux_evaluate(
     for i, data in enumerate(tqdm_iter):
         obs_image, gaze_attention, action_label = data
 
-        # 图像分割通道并处理
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
         obs_images = torch.split(obs_image, 3, dim=1)
         viz_obs_image = obs_images[-1]
         obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
@@ -930,12 +919,12 @@ def tokenaux_evaluate(
                 loggers[key].log_data(value.item())
 
         # 保存最后一个batch的数据，用于后续Grad-CAM可视化
-        last_data = (obs_image, action_label, viz_obs_image, action_pred)
+        last_data = (obs_image, action_label, viz_obs_images, action_pred)
         
     # 第二部分：对最后一个batch生成Grad-CAM可视化（需要开启梯度）
     if last_data is not None:
         # 确保 obs_image 具有梯度追踪
-        obs_image, action_label, viz_obs_image, _ = last_data
+        obs_image, action_label, viz_obs_images, _ = last_data
         obs_image = obs_image.clone().detach().requires_grad_(True)
 
         with torch.enable_grad():
@@ -962,10 +951,6 @@ def tokenaux_evaluate(
                 obs_features.shape[3],
                 obs_features.shape[4]
             )
-
-            # 选取最后一帧图像的特征图和梯度图
-            viz_obs_feature = obs_features[-1]
-            viz_obs_feature_grad = obs_features_grad[-1]
             
             # 记录可视化和其他日志信息
             bc_log_data(
@@ -975,10 +960,10 @@ def tokenaux_evaluate(
                 run_folder=run_folder,
                 num_images_log=num_images_log,
                 loggers=loggers,
-                obs_image=viz_obs_image,
+                obs_images=viz_obs_images,
                 action_pred=action_pred,
-                obs_features=viz_obs_feature,
-                obs_features_grad=viz_obs_feature_grad,
+                obs_features=obs_features,
+                obs_features_grad=obs_features_grad,
                 attention_scores=attention_scores,
                 action_label=action_label,
                 use_wandb=use_wandb,
