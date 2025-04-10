@@ -4,7 +4,7 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-method: "base" # base or cnnaux or tokenaux
+method: "base" # base or cnnaux or tokenaux or cross
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
 batch_size: 32

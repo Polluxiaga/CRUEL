@@ -278,6 +278,7 @@ def base_evaluate(
     """
     Evaluate the model on the given evaluation dataset.
     """
+    device = torch.device("cpu")
 
     # 设置模型为评估模式
     model = model.to(device)
@@ -721,7 +722,7 @@ def compute_tokenaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 0.4
+    alpha = 0.2
     total_loss = (1 - alpha) * action_loss + alpha * token_aux_loss
 
     results = {
@@ -766,7 +767,6 @@ def tokenaux_train(
         use_tqdm: whether to use tqdm
     """
     model = model.to(device)
-    optimizer = Adam(model.parameters(), lr=...)
     model.train()
     action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
     auxiliary_loss_logger = Logger("auxiliary_loss", "train", window_size=print_log_freq)

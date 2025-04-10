@@ -84,6 +84,7 @@ class bc_MultiLayerDecoder(nn.Module):
 class base_model(nn.Module):
     def __init__(
         self,
+        method: str = "base",
         context_size: int = 5,
         len_traj_pred: int = 3,
         encoder: Optional[str] = "efficientnet-b0",
@@ -96,6 +97,7 @@ class base_model(nn.Module):
         bc: 基于Transformer的架构，用于编码视觉观察，并预测动作。
         """
         super(base_model, self).__init__()
+        self.method = method
         self.context_size = context_size
         self.len_traj_pred = len_traj_pred
         self.encoding_size = encoding_size
@@ -117,6 +119,8 @@ class base_model(nn.Module):
             self.compress_obs_enc = nn.Linear(self.num_obs_features, self.encoding_size)
         else:
             self.compress_obs_enc = nn.Identity()
+
+        self.gaze_conv = nn.Conv2d(self.num_obs_features, 1, kernel_size=1)
 
         self.decoder = None
         self.action_predictor = nn.Sequential(
@@ -173,6 +177,13 @@ class base_model(nn.Module):
         obs_features = self.obs_encoder.extract_features(obs_img)  # [N, 1280, H/32, W/32]
         N, C, H, W = obs_features.shape  # N = batch_size * (context_size+1)
         
+        if self.method == "cnnaux":
+            # 生成gaze_use_map
+            gaze_use_map = self.gaze_conv(obs_features)
+            gaze_use_map = gaze_use_map.view(self.context_size + 1, -1, 1, H * W).squeeze(2)  # [context_size+1, batch_size, H/32 * W/32]
+            gaze_use_map = gaze_use_map.permute(1, 0, 2) # [batch_size, context_size+1, H/32 * W/32]
+            gaze_use_map = gaze_use_map.reshape(-1, (self.context_size+1)*H*W) # [batch_size, (context_size+1)*H/32*W/32]
+
         # 继续原有的处理流程
         obs_encoding = obs_features.permute(0, 2, 3, 1)  # [N, H/32, W/32, 1280]
         obs_encoding = obs_encoding.reshape(N, H*W, C)  # [N, H/32*W/32, 1280]
@@ -205,7 +216,11 @@ class base_model(nn.Module):
         handle.remove()
 
         # 返回预测结果和中间特征
-        return action_pred, self._raw_obs_features, attention_scores
+        if self.method == "cnnaux":
+            return action_pred, self._raw_obs_features, attention_scores, gaze_use_map
+        else:
+            # 如果不是cnnaux方法，则不需要gaze_use_map, 仅返回动作预测和原始观察特征
+            return action_pred, self._raw_obs_features, attention_scores
 
     @torch.utils.hooks.unserializable_hook
     def _capture_obs_features_grad(self, grad):
