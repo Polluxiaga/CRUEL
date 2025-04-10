@@ -200,7 +200,7 @@ def bc_draw(
     # 计算Grad-CAM热力图 (H, W)
     cam = compute_gradcam_heatmap(features, grads)
     heatmap = cv2.resize(cam, (obs_img.size[0], obs_img.size[1]))
-    heatmap = np.uint8(255 * heatmap)
+    heatmap = np.uint8(255 * (1 - heatmap))
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
     # 叠加热力图到观测图

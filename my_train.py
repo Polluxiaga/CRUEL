@@ -33,13 +33,13 @@ import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
 from my_data.my_dataset import gaze_dataset
-from my_model.base import base_model, cnnaux_model
+from my_model.base import base_model
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
 def main(config):
 
-    torch.set_num_threads(4)
+    torch.set_num_threads(8)
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -101,29 +101,16 @@ def main(config):
 
 
     # Create the model
-    if config["model_type"] == "vint" and (method == "base" or method == "tokenaux"):
-        model = base_model(
-            context_size=config["context_size"],
-            len_traj_pred=config["len_traj_pred"],
-            encoder=config["obs_encoder"],
-            encoding_size=config["encoding_size"],
-            mha_num_attention_heads=config["mha_num_attention_heads"],
-            mha_num_attention_layers=config["mha_num_attention_layers"],
-            mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        )
-    elif config["model_type"] == "vint" and method == "cnnaux":
-        model = cnnaux_model(
-            context_size=config["context_size"],
-            len_traj_pred=config["len_traj_pred"],
-            encoder=config["obs_encoder"],
-            encoding_size=config["encoding_size"],
-            mha_num_attention_heads=config["mha_num_attention_heads"],
-            mha_num_attention_layers=config["mha_num_attention_layers"],
-            mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        )
-    
-    else:
-        raise ValueError(f"Model {config['model']} not supported")
+    model = base_model(
+        method=method,
+        context_size=config["context_size"],
+        len_traj_pred=config["len_traj_pred"],
+        encoder=config["obs_encoder"],
+        encoding_size=config["encoding_size"],
+        mha_num_attention_heads=config["mha_num_attention_heads"],
+        mha_num_attention_layers=config["mha_num_attention_layers"],
+        mha_ff_dim_factor=config["mha_ff_dim_factor"],
+    )
     
 
     if config["clipping"]:
