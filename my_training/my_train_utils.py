@@ -412,7 +412,7 @@ def compute_cnnaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 0.2
+    alpha = 0.5
     total_loss = (1 - alpha) * action_loss + alpha * auxiliary_loss
 
     results = {
@@ -711,7 +711,7 @@ def compute_tokenaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 0.2
+    alpha = 0.5
     total_loss = (1 - alpha) * action_loss + alpha * token_aux_loss
 
     results = {
