@@ -194,12 +194,25 @@ class gaze_dataset(Dataset):
         """
         pkl_path = get_data_path(self.data_folder, trajectory_name, time).replace('.jpg', '.pkl')
         try:
-            # 使用 pandas 正确读取 DataFrame 类型的 pkl
+            if not os.path.exists(pkl_path):
+                print(f"Gaze data file not found: {pkl_path}")
+                return None
+                
             df = pd.read_pickle(pkl_path)
+            if df.empty:
+                print(f"Empty DataFrame in {pkl_path}")
+                return None
+                
             gaze_data = torch.tensor(df.to_numpy(), dtype=torch.float32)
+            if gaze_data.nelement() == 0:
+                print(f"Empty tensor created from {pkl_path}")
+                return None
+                
             return gaze_data
         except Exception as e:
-            print(f"Failed to load gaze data {pkl_path}: {e}")
+            print(f"Failed to load gaze data {pkl_path}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
             return None
 
 

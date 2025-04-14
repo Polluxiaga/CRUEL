@@ -4,11 +4,11 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-method: "base" # base or cnnaux or tokenaux or cross
+method: "base" # base or cnnaux or tokenaux
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
 batch_size: 32
-epochs: 37
+epochs: 100
 gpu_id: 1
 num_workers: 1
 lr: 5e-4
@@ -17,7 +17,7 @@ clipping: False
 max_norm: 1.
 scheduler: "cosine"
 warmup: True  
-warmup_epochs: 0
+warmup_epochs: 4
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
@@ -62,8 +62,8 @@ datasets:
 
 # logging stuff
 ## =0 turns off
-print_log_freq: 209 # in iterations
-image_log_freq: 209 # in iterations
+print_log_freq: 211 # in iterations
+image_log_freq: 211 # in iterations
 num_images_log: 6 #0 
 pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
