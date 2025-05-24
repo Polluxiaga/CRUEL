@@ -72,10 +72,10 @@ def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: 
     print("Data processing complete!")
 
 # 设置固定路径
-data_dir = '/home/yzc/CRUEL/ourdata'
-dataset_name = 'ourdata_splits'  # 自定义数据集名称
+data_dir = '/home/yzc/CRUEL/data'
+dataset_name = 'data_splits'  # 自定义数据集名称
 data_splits_dir = '/home/yzc/CRUEL'  # 目标目录
-split = 0.9  # 训练集和测试集的划分比例，默认80%训练，20%测试
+split = 0.8  # 训练集和测试集的划分比例，默认80%训练，20%测试
 
 # 调用处理数据函数
 process_data(data_dir, dataset_name, data_splits_dir, split)

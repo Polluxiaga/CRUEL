@@ -7,11 +7,11 @@ import time
 
 # 解析命令行参数
 parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
-parser.add_argument("--config", "-c", default="config.yaml", help="Path to config file")
+parser.add_argument("--config", "-c", default="configs/vint_config.yaml", help="Path to config file")
 args = parser.parse_args()
 
 # 加载配置文件
-with open("config.yaml", "r") as f:
+with open("configs/vint_config.yaml", "r") as f:
     default_config = yaml.safe_load(f)
 config = default_config.copy()
 with open(args.config, "r") as f:
@@ -34,6 +34,7 @@ from warmup_scheduler import GradualWarmupScheduler
 
 from my_data.my_dataset import gaze_dataset
 from my_model.base import base_model
+from my_training.my_train_utils import person_collate_fn, base_collate_fn
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
@@ -61,12 +62,12 @@ def main(config):
     train_dataset = []
     test_dataset = []
     method = config["method"]
-    data_config = config["datasets"]["ourdata"]
+    data_config = config["datasets"]["data"]
     for data_split_type in ["train", "test"]:
         dataset = gaze_dataset(
             data_folder=data_config["data_folder"],
             data_split_folder=data_config[data_split_type],
-            dataset_name="ourdata",
+            dataset_name="data",
             image_size=config["image_size"],
             len_traj_pred=config["len_traj_pred"],
             context_size=config["context_size"],
@@ -79,25 +80,56 @@ def main(config):
 
 
     train_dataset = ConcatDataset(train_dataset)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2
-    )
+    if method == "sel":
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=person_collate_fn  # Use person_collate_fn for sel model
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=base_collate_fn,
+        )
 
     test_dataset = ConcatDataset(test_dataset)
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=0,
-        drop_last=False,
-    )
+    if method == "sel":
+        test_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=person_collate_fn  # Use person_collate_fn for sel model
+        )
+    else:
+        test_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=base_collate_fn,
+        )
 
 
     # Create the model
@@ -192,8 +224,34 @@ def main(config):
             scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
 
 
+    # Add stage training config if method is "sel"
+    if config["method"] == "sel":
+        training_config = {
+            "enable_stage_training": True,
+            "current_stage": 1,
+            "stage1_epochs": config.get("stage1_epochs", 50),
+            "stage2_epochs": config.get("stage2_epochs", 30),
+            "stage3_epochs": config.get("stage3_epochs", 50),
+            "stage1_loss_threshold": config.get("stage1_loss_threshold", 0.1),
+            "stage2_loss_threshold": config.get("stage2_loss_threshold", 0.1),
+            "stage3_loss_threshold": config.get("stage3_loss_threshold", 0.1),
+            # 早停相关参数
+            "early_stopping": config.get("early_stopping", True),
+            "patience": config.get("patience", 10),
+            "min_delta": config.get("min_delta", 1e-4)
+        }
+    else:
+        training_config = {
+            "enable_stage_training": False,
+            "early_stopping": config.get("early_stopping", True),
+            "patience": config.get("patience", 10),
+            "min_delta": config.get("min_delta", 1e-4)
+        }
+
+    # Single train_eval_loop call for all methods
     train_eval_loop(
-        train_method=method,
+        train_method=config["method"],
+        training_config=training_config,
         train_model=config["train"],
         model=model,
         optimizer=optimizer,
@@ -213,30 +271,11 @@ def main(config):
         eval_fraction=config["eval_fraction"],
     )
 
-
     print("FINISHED TRAINING")
     wandb.finish()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
-    # ... 其他参数设置 ...
-    parser.add_argument(
-        "--config",
-        "-c",
-        default="config.yaml",
-        type=str,
-        help="Path to the config file in train_config folder",
-    )
-    args = parser.parse_args()
-
-    with open("config.yaml", "r") as f:
-        default_config = yaml.safe_load(f)
-    config = default_config
-
-    with open(args.config, "r") as f:
-        user_config = yaml.safe_load(f)
-    config.update(user_config)
 
     # 如果没有指定 load_run，则更新 run_name 和 run_folder，否则使用旧的
     if "load_run" not in config:
