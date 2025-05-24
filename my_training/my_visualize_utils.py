@@ -7,7 +7,8 @@ from typing import Optional
 import wandb
 import seaborn as sns
 
-VIZ_IMAGE_SIZE = (700, 400)
+VIZ_IMAGE_SIZE = (500, 400)
+FEATURE_SIZE = (4, 5)
 RED = np.array([1, 0, 0])
 GREEN = np.array([0, 1, 0])
 BLUE = np.array([0, 0, 1])
@@ -82,39 +83,45 @@ def plot_trajs_and_points(
         ax.legend(bbox_to_anchor=(0.0, -0.5), loc="upper left", ncol=2)
 
 
-def compute_gradcam_heatmap(features: np.ndarray, grads: np.ndarray) -> np.ndarray:
+def compute_attention_map(attention_scores: np.ndarray, time_idx: int) -> np.ndarray:
     """
-    根据特征图和梯度计算Grad-CAM热力图。
+    根据attention scores计算特定时间步的注意力热力图。
     Args:
-        features: 形状为 (C, H, W) 的特征图
-        grads: 与features形状相同的梯度
+        attention_scores: 形状为 [seq_len, seq_len] 的注意力分数
+        time_idx: 时间步索引
     Returns:
         热力图，范围 [0, 1]
     """
-    # 对每个通道计算梯度均值作为权重
-    weights = np.mean(grads, axis=(1, 2), keepdims=True)  # shape: (C, 1, 1)
-    cam = np.sum(weights * features, axis=0)  # 聚合特征图，shape: (H, W)
-    # 仅保留正值，并归一化
-    cam = np.maximum(cam, 0)
-    if np.max(cam) != 0:
-        cam = cam / np.max(cam)
-    return cam       
+    # 先在行方向上平均，得到每个token被关注的平均程度 [1, seq_len]
+    mean_attention = attention_scores.mean(axis=0)
+    
+    # 对整个序列的attention scores进行归一化
+    mean_attention = (mean_attention - mean_attention.min()) / (mean_attention.max() - mean_attention.min() + 1e-8)
+    
+    # 获取对应时间步的attention scores
+    start_idx = time_idx * (FEATURE_SIZE[0] * FEATURE_SIZE[1])
+    end_idx = (time_idx + 1) * (FEATURE_SIZE[0] * FEATURE_SIZE[1])
+    frame_attention = mean_attention[start_idx:end_idx]  # [feature_len]
+    
+    # 将一维attention weights重塑为二维特征图
+    H, W = FEATURE_SIZE
+    attention_map = frame_attention.reshape(H, W)
+    
+    return attention_map     
 
 
 def bc_draw(
     obs_imgs: list,  # List of 6 PIL Images
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
-    obs_features: np.ndarray,  # [T, C, H, W]
-    obs_features_grad: Optional[np.ndarray],  # [T, C, H, W]
-    attention_scores: np.ndarray,
+    attention_scores: np.ndarray,  # [seq_len, seq_len]
     save_path: Optional[str] = None,
     display: Optional[bool] = False,
 ):
     """
     创建3x3的可视化布局:
     - 第一行：轨迹预测(1列) + 注意力图(2-3列)
-    - 第二行和第三行：6张观测图的Grad-CAM热力图
+    - 第二行和第三行：6张观测图的attention map叠加图
     """
     # 创建3x3布局
     fig, axes = plt.subplots(3, 3, figsize=(24, 24))
@@ -133,19 +140,19 @@ def bc_draw(
         cmap="viridis", 
         annot=False, 
         fmt=".2f", 
-        ax=axes[0, 1:].ravel()[0],  # 跨两列显示
+        ax=axes[0, 1:].ravel()[0],
         square=True
     )
     attention_plot.set_title("Attention Map")
-    axes[0, 2].remove()  # 移除多余的轴
-
-    # 第二行和第三行：6张Grad-CAM热力图
-    for idx, (img, feat, grad) in enumerate(zip(obs_imgs, obs_features, obs_features_grad)):
-        row = 1 + idx // 3  # 第二行开始
-        col = idx % 3       # 从左到右排列
+    axes[0, 2].remove()
+    
+    # 第二行和第三行：6张attention map叠加图
+    for idx, img in enumerate(obs_imgs):
+        row = 1 + idx // 3
+        col = idx % 3
         
-        # 计算当前图像的Grad-CAM
-        cam = compute_gradcam_heatmap(feat, grad)
+        # 计算当前时间步的attention map
+        attention_map = compute_attention_map(attention_scores, idx)
         
         # Convert PIL Image to numpy array
         obs_img_np = np.array(img)
@@ -153,12 +160,12 @@ def bc_draw(
         # Get image dimensions
         h, w = obs_img_np.shape[:2]
         
-        # Resize CAM to match image dimensions
-        heatmap = cv2.resize(cam, (w, h))
+        # Resize attention map to match image dimensions
+        heatmap = cv2.resize(attention_map, (w, h))
         heatmap = np.uint8(255 * heatmap)
         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         
-        # Convert BGR to RGB (OpenCV uses BGR)
+        # Convert BGR to RGB
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
         # 叠加热力图到观测图
@@ -166,7 +173,7 @@ def bc_draw(
         
         # 显示叠加后的图像
         axes[row, col].imshow(heatmap_img)
-        axes[row, col].set_title(f"Frame {idx+1} with Grad-CAM")
+        axes[row, col].set_title(f"Frame {idx+1} with Attention Map")
         axes[row, col].axis('off')
 
     plt.tight_layout()
@@ -182,8 +189,6 @@ def bc_visualize(
     batch_obs_images: np.ndarray,  # [B, T, 3, H, W]
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
-    obs_features: np.ndarray,  # [B, T, C, H, W]
-    obs_features_grads: np.ndarray,  # [B, T, C, H, W]
     attention_scores: np.ndarray,
     mode: str,
     save_folder: str,
@@ -229,8 +234,6 @@ def bc_visualize(
 
         pred_waypoints = batch_pred_waypoints[i]
         label_waypoints = batch_label_waypoints[i]
-        features = obs_features[i]  # [T, C, H, W]
-        features_grad = obs_features_grads[i]  # [T, C, H, W]
         attention_score = attention_scores[i]
 
         save_path = None
@@ -241,8 +244,6 @@ def bc_visualize(
             obs_imgs,
             pred_waypoints,
             label_waypoints,
-            features,
-            features_grad,
             attention_score,
             save_path,
             display,

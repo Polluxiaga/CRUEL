@@ -3,7 +3,7 @@ import os
 from typing import Optional
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate
+from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate, sel_train, sel_evaluate
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ from torchvision import transforms
 
 def train_eval_loop(
     train_method: str,
+    training_config: dict,
     train_model: bool,
     model: nn.Module,
     optimizer: Adam,
@@ -33,7 +34,7 @@ def train_eval_loop(
     eval_fraction: float = 0.25,
 ):
     """
-    Train and evaluate the model for several epochs
+    Train and evaluate the model for several epochs with early stopping support.
 
     Args:
         train_model: whether to train the model or not
@@ -46,6 +47,20 @@ def train_eval_loop(
         epochs: number of epochs to train
         device: device to train on
         run_folder: folder to save checkpoints and logs
+        training_config: Optional dict containing stage training configuration:
+            {
+                "enable_stage_training": bool,
+                "current_stage": 1/2/3,
+                "stage1_epochs": int,
+                "stage2_epochs": int,
+                "stage3_epochs": int,
+                "stage1_loss_threshold": float,
+                "stage2_loss_threshold": float,
+                "stage3_loss_threshold": float,
+                "early_stopping": bool,
+                "patience": int,
+                "min_delta": float
+            }
         wandb_log_freq: frequency of logging to wandb
         print_log_freq: frequency of printing to console
         image_log_freq: frequency of logging images to wandb
@@ -55,13 +70,39 @@ def train_eval_loop(
         eval_fraction: fraction of training data to use for evaluation
     """
     latest_path = os.path.join(run_folder, f"latest.pth")
+    best_test_loss = float('inf')
+    best_epoch = 0
+    epochs_without_improvement = 0
+    best_model_path = os.path.join(run_folder, "best.pth")
 
     for epoch in range(current_epoch, epochs):
         if train_model:
-            print(
-                f"Start ViNT Training Epoch {epoch}/{epochs - 1}"
-            )
-            if train_method == "base":
+            training_stage = None
+            if training_config and training_config["enable_stage_training"]:
+                stage = training_config["current_stage"]
+                training_stage = {
+                    "stage": stage,
+                    "use_gt_masks": (stage == 1),
+                    "freeze_selector": (stage == 1),
+                    "freeze_transformer": (stage == 2)
+                }
+            if train_method == "sel":
+                sel_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    training_stage=training_stage,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "base":
                 base_train(
                     model=model,
                     optimizer=optimizer,
@@ -107,12 +148,22 @@ def train_eval_loop(
                     use_wandb=use_wandb,
                 )
 
-        
-        print(
-            f"Start ViNT Testing Epoch {epoch}/{current_epoch + epochs - 1}"
-        )
-        if train_method == "base":
-            action_test_loss = base_evaluate(
+        # Evaluation
+        test_loss = None
+        if train_method == "sel":
+            test_loss = sel_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "base":
+            test_loss = base_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
@@ -124,7 +175,7 @@ def train_eval_loop(
                 eval_fraction=eval_fraction,
             )
         elif train_method == "cnnaux":
-            action_test_loss = cnnaux_evaluate(
+            test_loss = cnnaux_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
@@ -136,7 +187,7 @@ def train_eval_loop(
                 eval_fraction=eval_fraction,
             )
         elif train_method == "tokenaux":
-            action_test_loss = tokenaux_evaluate(
+            test_loss = tokenaux_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
@@ -148,12 +199,66 @@ def train_eval_loop(
                 eval_fraction=eval_fraction,
             )
 
+        # Early stopping check
+        if training_config and training_config.get("early_stopping", False):
+            if test_loss < best_test_loss - training_config.get("min_delta", 1e-4):
+                # 有显著改善
+                best_test_loss = test_loss
+                best_epoch = epoch
+                epochs_without_improvement = 0
+
+                # Save best model
+                checkpoint = {
+                    "epoch": epoch,
+                    "model": model,
+                    "optimizer": optimizer,
+                    "test_loss": test_loss,
+                    "scheduler": scheduler,
+                    "training_config": training_config
+                }
+                torch.save(checkpoint, best_model_path)
+                print(f"Saved best model with test_loss {test_loss:.4f} at epoch {epoch}")
+            else:
+                epochs_without_improvement += 1
+
+            # Check if we should stop
+            patience = training_config.get("patience", 10)
+            if epochs_without_improvement >= patience:
+                print(f"\nEarly stopping triggered! No improvement for {patience} epochs")
+                print(f"Best performance was {best_test_loss:.4f} at epoch {best_epoch}")
+
+                # Load best model
+                best_checkpoint = torch.load(best_model_path)
+                load_model(model, best_checkpoint)
+                break
+
+        # Handle stage transitions
+        if training_config and training_config["enable_stage_training"]:
+            stage = training_config["current_stage"]
+            if stage == 1 and (
+                epoch >= training_config["stage1_epochs"] or
+                test_loss < training_config["stage1_loss_threshold"]
+            ):
+                print(f"Moving to stage 2 at epoch {epoch}")
+                training_config["current_stage"] = 2
+                optimizer.param_groups[0]['lr'] = optimizer.defaults['lr']
+            
+            elif stage == 2 and (
+                epoch >= training_config["stage2_epochs"] + training_config["stage1_epochs"] or
+                test_loss < training_config["stage2_loss_threshold"]
+            ):
+                print(f"Moving to stage 3 at epoch {epoch}")
+                training_config["current_stage"] = 3
+                optimizer.param_groups[0]['lr'] = optimizer.defaults['lr']
+
+        # Save checkpoints
         checkpoint = {
             "epoch": epoch,
             "model": model,
             "optimizer": optimizer,
-            "action_test_loss": action_test_loss,
-            "scheduler": scheduler
+            "test_loss": test_loss,
+            "scheduler": scheduler,
+            "training_config": training_config
         }
         # log average eval loss
         wandb.log({}, commit=False)
@@ -161,11 +266,11 @@ def train_eval_loop(
         if scheduler is not None:
             # scheduler calls based on the type of scheduler
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(action_test_loss)
+                scheduler.step(test_loss)
             else:
                 scheduler.step()
         wandb.log({
-            "action_test_loss": action_test_loss,
+            "test_loss": test_loss,
             "lr": optimizer.param_groups[0]["lr"],
         }, commit=False)
 
