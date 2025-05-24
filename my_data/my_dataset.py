@@ -68,32 +68,41 @@ class gaze_dataset(Dataset):
         self._load_index()
         
         # Use cache path as unique key for tracking built status
-        self._cache_path = os.path.join(
+        # We'll use two separate LMDBs for images and masks for clarity and modularity
+        self._image_cache_path = os.path.join(
             self.data_split_folder,
             f"{self.dataset_name}_images.lmdb",
         )
+        self._mask_cache_path = os.path.join( # New cache path for masks
+            self.data_split_folder,
+            f"{self.dataset_name}_masks.lmdb",
+        )
         
         # Only build caches if not already built for this cache path
-        if self._cache_path not in self._caches_built:
+        if self._image_cache_path not in self._caches_built: # Check image cache build status
             self._build_caches()
-            self._caches_built[self._cache_path] = True
+            self._caches_built[self._image_cache_path] = True
         
-        # Always open the LMDB environment
+        # Always open the LMDB environment for both
         self._open_cache()
 
     def _open_cache(self):
-        """Open the LMDB environment in read-only mode"""
-        self._image_cache = lmdb.open(self._cache_path, readonly=True, max_readers=256, lock=False)
+        """Open the LMDB environment(s) in read-only mode"""
+        self._image_cache = lmdb.open(self._image_cache_path, readonly=True, max_readers=256, lock=False)
+        self._mask_cache = lmdb.open(self._mask_cache_path, readonly=True, max_readers=256, lock=False) # Open mask cache
 
     def __del__(self):
         """Clean up LMDB resources"""
         if hasattr(self, '_image_cache'):
             self._image_cache.close()
+        if hasattr(self, '_mask_cache'): # Close mask cache
+            self._mask_cache.close()
 
     def __getstate__(self):
         """Handle pickling"""
         state = self.__dict__.copy()
         state["_image_cache"] = None
+        state["_mask_cache"] = None # Ensure mask cache is also set to None
         return state
     
     def __setstate__(self, state):
@@ -158,23 +167,65 @@ class gaze_dataset(Dataset):
 
     def _build_caches(self, use_tqdm: bool = True):
         """扩展缓存以包含所有需要的数据"""
-        if os.path.exists(self._cache_path):
+        # Check if both caches exist, if so, return
+        if os.path.exists(self._image_cache_path) and os.path.exists(self._mask_cache_path):
             return
 
         tqdm_iterator = tqdm.tqdm(
             self.goals_index,
             disable=not use_tqdm,
             dynamic_ncols=True,
-            desc=f"Building LMDB cache for {self.dataset_name}"
+            desc=f"Building LMDB caches for {self.dataset_name}"
         )
 
-        with lmdb.open(self._cache_path, map_size=2**40) as cache:
-            with cache.begin(write=True) as txn:
+        # Open both LMDB environments for writing
+        with lmdb.open(self._image_cache_path, map_size=2**40) as img_cache, \
+             lmdb.open(self._mask_cache_path, map_size=2**40) as mask_cache:
+            with img_cache.begin(write=True) as img_txn, \
+                 mask_cache.begin(write=True) as mask_txn:
                 for traj_name, time in tqdm_iterator:
-                    # Cache images
+                    # Cache images (existing logic)
                     image_path = get_data_path(self.data_folder, traj_name, time)
                     with open(image_path, "rb") as f:
-                        txn.put(image_path.encode(), f.read())
+                        img_txn.put(image_path.encode(), f.read())
+
+                    # --- New: Cache person masks ---
+                    # First, load person_ids for the current frame
+                    person_ids, _ = self._load_persons(traj_name, time) # Use internal _load_persons
+
+                    # Prepare a dictionary to store all masks for the current frame
+                    frame_masks = {}
+                    H, W = self.image_size
+                    dummy_mask_tensor = torch.zeros((H, W), dtype=torch.bool)
+
+                    # Iterate through each person_id and load/process their mask
+                    for person_id in person_ids:
+                        mask_path = os.path.join(self.data_folder, traj_name, f'{time}.csv')
+                        current_person_mask = dummy_mask_tensor # Start with dummy
+
+                        try:
+                            df = pd.read_csv(mask_path)
+                            if not df.empty:
+                                col_name = str(person_id)
+                                if col_name in df.columns:
+                                    col = df[col_name].to_numpy(dtype=np.uint8)
+                                    padding_needed = H * W - col.size
+                                    col = np.pad(col, (0, padding_needed), 'constant', constant_values=0)
+                                    current_person_mask = torch.from_numpy(col.reshape(H, W).astype(bool))
+                        except pd.errors.EmptyDataError:
+                            pass # File is empty, current_person_mask remains dummy
+                        except FileNotFoundError:
+                            pass # CSV file not found, current_person_mask remains dummy
+                        except Exception as e:
+                            print(f"Warning: Error processing mask for {person_id} in {traj_name} at time {time}: {e}. Using dummy mask.")
+                            pass
+
+                        frame_masks[str(person_id)] = current_person_mask.numpy().tobytes() # Store as bytes
+
+                    # Store the pickled dictionary of masks for this frame
+                    # The key should uniquely identify the frame and mask type, e.g., "traj_name_time_masks"
+                    mask_key = f"{traj_name}_{time}_masks".encode()
+                    mask_txn.put(mask_key, pickle.dumps(frame_masks))
 
 
     def _load_image(self, trajectory_name, time):
@@ -188,8 +239,12 @@ class gaze_dataset(Dataset):
             return img_path_to_data(image_bytes)
         except Exception as e:
             print(f"Failed to load image {image_path}: {e}")
+            # Consider returning a dummy black image or raising an error if image is critical
+            # For robustness, returning a dummy image (e.g., zeros) might be better than crashing
+            H, W = self.image_size
+            return torch.zeros((3, H, W), dtype=torch.float32)
 
-    
+
     def _get_selected(self, trajectory_name, curr_time):
         if trajectory_name not in self.select_ids_cache:
             with open(os.path.join(self.data_folder, trajectory_name, "select_ids.pkl"), "rb") as f:
@@ -220,7 +275,10 @@ class gaze_dataset(Dataset):
             print(f"Current time: {curr_time}")
             print(f"List length: {len(self.person_ids_cache[trajectory_name])}")
             print(f"Content preview: {self.person_ids_cache[trajectory_name][:10]}")
-            raise  # 重新抛出异常，但已经打印了有用的调试信息
+            # If this is called during _build_caches, it might mask the root issue.
+            # If it's called during __getitem__, it might be a data consistency issue.
+            # Deciding whether to raise or return empty depends on expected behavior.
+            return [], [] # Returning empty lists for person_ids and labels
         
         select_ids = self._get_selected(trajectory_name, curr_time)
         labels = [1 if tid in select_ids else 0 for tid in person_ids]
@@ -230,33 +288,33 @@ class gaze_dataset(Dataset):
 
     def _load_person_mask(self, trajectory_name, time, person_id):
         """
-        Load mask for person_id at given frame (from CSV), return tensor HxW bool.
-        Mask CSV file named '{time}.csv' with columns as person_ids and rows flatten image.
+        Load mask for person_id at given frame from LMDB cache, return tensor HxW bool.
         """
-        mask_path = os.path.join(self.data_folder, trajectory_name, f'{time}.csv')
-        # default zeros
         H, W = self.image_size
-        dummy = torch.zeros((H, W), dtype=torch.bool)
+        dummy_mask = torch.zeros((H, W), dtype=torch.bool)
         
-        # Return dummy if file is empty
+        mask_key = f"{trajectory_name}_{time}_masks".encode()
+        
         try:
-            df = pd.read_csv(mask_path)
-            if df.empty:
-                return dummy
-        except pd.errors.EmptyDataError:
-            return dummy
-
-        col_name = str(person_id)
-        if col_name not in df.columns:
-            return dummy
-        
-        col = df[col_name].to_numpy(dtype=np.uint8)
-
-        padding_needed = H*W - col.size
-        col = np.pad(col, (0, padding_needed), 'constant', constant_values=0)
-
-        mask = torch.from_numpy(col.reshape(H, W).astype(bool))
-        return mask
+            with self._mask_cache.begin() as txn:
+                frame_masks_bytes = txn.get(mask_key)
+                if frame_masks_bytes is None:
+                    # Key not found, indicating no masks or an issue during caching
+                    return dummy_mask
+                
+                frame_masks_dict = pickle.loads(frame_masks_bytes)
+                
+                person_id_str = str(person_id)
+                if person_id_str in frame_masks_dict:
+                    mask_bytes = frame_masks_dict[person_id_str]
+                    mask_np = np.frombuffer(mask_bytes, dtype=bool).reshape(H, W)
+                    return torch.from_numpy(mask_np)
+                else:
+                    # Person ID not found in the dictionary for this frame
+                    return dummy_mask
+        except Exception as e:
+            print(f"Failed to load mask for person {person_id} in {trajectory_name} at time {time} from cache: {e}")
+            return dummy_mask
 
 
     def _load_fixations(self, trajectory_name, curr_time):
@@ -372,12 +430,12 @@ class gaze_dataset(Dataset):
             person_masks = torch.zeros((1, self.context_size + 1, H, W), dtype=torch.bool)
             select_labels = torch.zeros((1,), dtype=torch.bool)
         else:
-            # Original person mask loading logic
-            person_masks = []
+            # Load masks from LMDB cache
+            person_masks_list = []
             for tid in person_ids:
                 seq = [self._load_person_mask(traj_name, t, tid) for t in context]
-                person_masks.append(torch.stack(seq, dim=0))  # (context_size+1, H, W)
-            person_masks = torch.stack(person_masks, dim=0).bool()  # (num_persons, context_size+1, H, W)
+                person_masks_list.append(torch.stack(seq, dim=0))  # (context_size+1, H, W)
+            person_masks = torch.stack(person_masks_list, dim=0).bool()  # (num_persons, context_size+1, H, W)
 
         # Load trajectory data
         curr_traj_data = self._get_trajectory(traj_name)

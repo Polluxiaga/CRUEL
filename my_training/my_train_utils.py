@@ -280,7 +280,6 @@ def base_train(
             print_log_freq=print_log_freq,
             image_log_freq=image_log_freq,
         )
-        print(f"Current learning rate: {optimizer.param_groups[0]['lr']}")
 
 
 def base_evaluate(
@@ -538,7 +537,6 @@ def cnnaux_train(
             print_log_freq=print_log_freq,
             image_log_freq=image_log_freq,
         )
-        print(f"Current learning rate: {optimizer.param_groups[0]['lr']}")
 
 
 def cnnaux_evaluate(
@@ -822,7 +820,6 @@ def tokenaux_train(
             print_log_freq=print_log_freq,
             image_log_freq=image_log_freq,
         )
-        print(f"Current learning rate: {optimizer.param_groups[0]['lr']}")
 
 
 def tokenaux_evaluate(
@@ -1144,7 +1141,6 @@ def sel_train(
             print_log_freq=print_log_freq,
             image_log_freq=image_log_freq,
         )
-        print(f"Current learning rate: {optimizer.param_groups[0]['lr']}")
 
 
 def sel_evaluate(
