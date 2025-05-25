@@ -4,8 +4,8 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-gpu_id: 2
-method: "tokenaux" # base or cnnaux or tokenaux or sel
+gpu_id: 0
+method: "base" # base or cnnaux or tokenaux or sel
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
 batch_size: 64
@@ -25,7 +25,7 @@ seed: 0
 
 # Early stopping parameters
 early_stopping: true  # 是否启用早停
-patience: 10         # 容忍多少个epoch测试损失没有改善
+patience: 25         # 容忍多少个epoch测试损失没有改善
 min_delta: 0.0001    # 改善阈值，测试损失至少改善这么多才算数
 
 # Stage training parameters (only used when method is "sel")

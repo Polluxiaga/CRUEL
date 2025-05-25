@@ -308,7 +308,7 @@ class gaze_dataset(Dataset):
                 if person_id_str in frame_masks_dict:
                     mask_bytes = frame_masks_dict[person_id_str]
                     mask_np = np.frombuffer(mask_bytes, dtype=bool).reshape(H, W)
-                    return torch.from_numpy(mask_np)
+                    return torch.from_numpy(mask_np.copy())
                 else:
                     # Person ID not found in the dictionary for this frame
                     return dummy_mask
@@ -334,12 +334,44 @@ class gaze_dataset(Dataset):
         dummy_attention_map = torch.zeros((1, H, W), dtype=torch.float32)
 
         try:
-            fixation_row = fixations_df.iloc[curr_time]
-            fx, fy = fixation_row[0], fixation_row[1]
-            fixations = [(fx, fy)] # 转换为list of tuples格式
-
+            fx, fy = 0, 0 
+            
+            # Check current time's fixation
+            if curr_time < len(fixations_df):
+                current_fx, current_fy = fixations_df.iloc[curr_time][0], fixations_df.iloc[curr_time][1]
+                if not (current_fx == 0 and current_fy == 0):
+                    fx, fy = current_fx, current_fy
+            
+            # If current fixation is (0,0), search for the nearest non-(0,0) by alternating
             if fx == 0 and fy == 0:
-                return dummy_attention_map
+                found_fixation = False
+                max_offset = max(curr_time, len(fixations_df) - 1 - curr_time)
+
+                for offset in range(1, max_offset + 1):
+                    # Check backward
+                    idx_b = curr_time - offset
+                    if idx_b >= 0:
+                        temp_fx_b, temp_fy_b = fixations_df.iloc[idx_b][0], fixations_df.iloc[idx_b][1]
+                        if not (temp_fx_b == 0 and temp_fy_b == 0):
+                            fx, fy = temp_fx_b, temp_fy_b
+                            found_fixation = True
+                            break
+                    
+                    # Check forward
+                    idx_f = curr_time + offset
+                    if idx_f < len(fixations_df):
+                        temp_fx_f, temp_fy_f = fixations_df.iloc[idx_f][0], fixations_df.iloc[idx_f][1]
+                        if not (temp_fx_f == 0 and temp_fy_f == 0):
+                            fx, fy = temp_fx_f, temp_fy_f
+                            found_fixation = True
+                            break
+                
+                # If still (0,0) after searching, return dummy map
+                if not found_fixation:
+                    print(f"No non-(0,0) fixations found for {trajectory_name} around time {curr_time}. Returning dummy map.")
+                    return dummy_attention_map
+            
+            fixations = [(fx, fy)] 
 
         except IndexError: # 确保处理超出索引的情况
             print(f"Error loading fixations for {trajectory_name} at time {curr_time}: Index out of bounds. Returning dummy map.")
