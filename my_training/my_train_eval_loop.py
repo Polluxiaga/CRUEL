@@ -3,7 +3,7 @@ import os
 from typing import Optional
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate, personaux_train, personaux_evaluate, sel_train, sel_evaluate
+from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate, personaux_train, personaux_evaluate, sel_train, sel_evaluate, personchannel_train, personchannel_evaluate
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -101,6 +101,21 @@ def train_eval_loop(
                     num_images_log=num_images_log,
                     use_wandb=use_wandb,
                 )
+            elif train_method == "personchannel":
+                personchannel_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
             elif train_method == "base":
                 base_train(
                     model=model,
@@ -166,6 +181,18 @@ def train_eval_loop(
         test_loss = None
         if train_method == "sel":
             test_loss = sel_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "personchannel":
+            test_loss = personchannel_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
