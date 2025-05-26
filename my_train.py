@@ -80,7 +80,7 @@ def main(config):
 
 
     train_dataset = ConcatDataset(train_dataset)
-    if method == "sel":
+    if method == "sel" or method == "personaux":
         train_loader = DataLoader(
             train_dataset,
             batch_size=config["batch_size"],
@@ -106,7 +106,7 @@ def main(config):
         )
 
     test_dataset = ConcatDataset(test_dataset)
-    if method == "sel":
+    if method == "sel" or method == "personaux":
         test_loader = DataLoader(
             train_dataset,
             batch_size=config["batch_size"],
