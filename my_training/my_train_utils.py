@@ -919,6 +919,260 @@ def tokenaux_evaluate(
 
 ###################################################################################################
 
+def personaux_train(
+    model: nn.Module,
+    optimizer: Adam,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int,
+    print_log_freq: int = 10,
+    wandb_log_freq: int = 10,
+    image_log_freq: int = 1000,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    use_tqdm: bool = True,
+):
+    """
+    Train the model for one epoch.
+
+    Args:
+        model: model to train
+        optimizer: optimizer to use
+        dataloader: dataloader for training
+        transform: transform to use
+        device: device to use
+        run_folder: folder to save images to
+        epoch: current epoch
+        print_log_freq: how often to print loss
+        image_log_freq: how often to log images
+        num_images_log: number of images to log
+        use_wandb: whether to use wandb
+        use_tqdm: whether to use tqdm
+    """
+    model = model.to(device)
+    model.train()
+    scaler = GradScaler()
+
+    action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
+    auxiliary_loss_logger = Logger("auxiliary_loss", "train", window_size=print_log_freq)
+    total_loss_logger = Logger("total_loss", "train", window_size=print_log_freq)
+    action_waypts_cos_sim_logger = Logger("action_waypts_cos_sim", "train", window_size=print_log_freq)
+    
+    loggers = {
+        "action_loss": action_loss_logger,
+        "auxiliary_loss": auxiliary_loss_logger,
+        "total_loss": total_loss_logger,
+        "action_waypts_cos_sim": action_waypts_cos_sim_logger,
+    }
+
+    num_batches = len(dataloader)
+    tqdm_iter = tqdm.tqdm(
+        dataloader,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Training epoch {epoch}",
+    )
+    for i, data in enumerate(tqdm_iter):
+        (
+            obs_image, # [batch_size, 3 * (context_size+1), H, W]
+            _, # [batch_size, context_size+1, H, W]
+            person_masks, # [batch_size, num_persons, context_size+1, H, W]
+            select_labels, # [batch_size, num_persons]
+            action_label,
+            invalid, # [batch_size, num_persons]
+        ) = data
+
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
+        obs_images = torch.split(obs_image, 3, dim=1)
+        obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
+        obs_image = torch.cat(obs_images, dim=1)
+
+        # Convert person_masks to person_attention by taking union along num_persons dimension
+        person_masks = person_masks.to(device)
+        select_labels = select_labels.to(device)
+        invalid = invalid.to(device)
+        # Create selection mask using select_labels and invalid flag
+        valid_masks = ~invalid  # [B, P]
+        select_mask = (select_labels == 1) & valid_masks  # [B, P]
+        select_mask = select_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # [B, P, 1, 1, 1]
+
+        person_masks = person_masks * select_mask.float()  # Zero out invalid masks
+        person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
+        
+        # Pool person_attention to match output size
+        output_h = person_attention.shape[2] // 32
+        output_w = person_attention.shape[3] // 32
+        person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+        person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+
+        action_label = action_label.to(device)
+
+        optimizer.zero_grad()
+
+        with autocast():
+            action_pred, attention_scores = model(obs_image)
+            losses = compute_tokenaux_loss(
+            action_label=action_label,
+            action_pred=action_pred,
+            gaze_map=person_attention_flattened,
+            attention_scores=attention_scores
+            )
+            loss = losses["total_loss"]
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        """ # 取回obs_features的梯度
+        obs_features_grad = model._grad_obs_features
+
+        if obs_features_grad is not None:
+            obs_features_grad = obs_features_grad.contiguous().view(
+            model.context_size + 1,
+            -1,
+            obs_features.shape[2],
+            obs_features.shape[3],
+            obs_features.shape[4]
+        ) """
+
+        for key, value in losses.items():
+            if key in loggers:
+                logger = loggers[key]
+                logger.log_data(value.item())
+
+        log_data(
+            i=i,
+            epoch=epoch,
+            num_batches=num_batches,
+            run_folder=run_folder,
+            num_images_log=num_images_log,
+            loggers=loggers,
+            obs_images=viz_obs_images,
+            action_pred=action_pred,
+            attention_scores=attention_scores,
+            action_label=action_label,
+            use_wandb=use_wandb,
+            mode="train",
+            use_latest=True,
+            wandb_log_freq=wandb_log_freq,
+            print_log_freq=print_log_freq,
+            image_log_freq=image_log_freq,
+        )
+
+
+def personaux_evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int = 0,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    eval_fraction: float = 1.0,
+    use_tqdm: bool = True,
+):
+    """
+    Evaluate the model on the given evaluation dataset.
+    """
+
+    # 设置模型为评估模式
+    model = model.to(device)
+    model.eval()
+
+    # 初始化日志器
+    loggers = {
+        "action_loss": Logger("action_loss", "test"),
+        "auxiliary_loss": Logger("auxiliary_loss", "test"),
+        "total_loss": Logger("total_loss", "test"),
+        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
+    }
+
+    num_batches = max(int(len(dataloader) * eval_fraction), 1)
+
+    tqdm_iter = tqdm.tqdm(
+        itertools.islice(dataloader, num_batches),
+        total=num_batches,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Evaluating for epoch {epoch}",
+    )
+    
+    with torch.no_grad():
+        for i, data in enumerate(tqdm_iter):
+            obs_image, _, person_masks, select_labels, action_label, invalid = data
+    
+            viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
+            obs_images = torch.split(obs_image, 3, dim=1)
+            obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
+            obs_image = torch.cat(obs_images, dim=1)
+
+            # Convert person_masks to person_attention by taking union along num_persons dimension
+            person_masks = person_masks.to(device)
+            select_labels = select_labels.to(device)
+            invalid = invalid.to(device)
+            # Create selection mask using select_labels and invalid flag
+            valid_masks = ~invalid  # [B, P]
+            select_mask = (select_labels == 1) & valid_masks  # [B, P]
+            select_mask = select_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # [B, P, 1, 1, 1]
+
+            person_masks = person_masks * select_mask.float()  # Zero out invalid masks
+            person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
+        
+            # Pool person_attention to match output size
+            output_h = person_attention.shape[2] // 32
+            output_w = person_attention.shape[3] // 32
+            person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+            person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+
+
+            action_label = action_label.to(device)
+
+            # 前向推理
+            action_pred, attention_scores = model(obs_image)
+
+            # 计算损失并记录（注意：此处直接用 .item() 记录数值）
+            losses = compute_tokenaux_loss(
+                action_label=action_label,
+                action_pred=action_pred,
+                gaze_map=person_attention_flattened,
+                attention_scores=attention_scores
+            )
+            for key, value in losses.items():
+                if key in loggers:
+                    loggers[key].log_data(value.item())
+
+            # 只对最后一个batch进行可视化
+            if i == num_batches - 1: 
+                log_data(
+                    i=0,
+                    epoch=epoch,
+                    num_batches=num_batches,
+                    run_folder=run_folder,
+                    num_images_log=num_images_log,
+                    loggers=loggers,
+                    obs_images=viz_obs_images,
+                    action_pred=action_pred,
+                    attention_scores=attention_scores,
+                    action_label=action_label,
+                    use_wandb=use_wandb,
+                    mode="test",
+                    use_latest=False,
+                    wandb_log_freq=1,
+                    print_log_freq=1,
+                    image_log_freq=1,
+                    wandb_increment_step=False,
+                )
+
+    # 返回主要评估指标
+    return loggers["action_loss"].average()
+
+###################################################################################################
+
 def compute_selloss(
     select_label: torch.Tensor,
     action_label: torch.Tensor,

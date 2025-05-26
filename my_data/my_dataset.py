@@ -468,6 +468,7 @@ class gaze_dataset(Dataset):
                 seq = [self._load_person_mask(traj_name, t, tid) for t in context]
                 person_masks_list.append(torch.stack(seq, dim=0))  # (context_size+1, H, W)
             person_masks = torch.stack(person_masks_list, dim=0).bool()  # (num_persons, context_size+1, H, W)
+            select_labels = torch.tensor(select_labels, dtype=torch.bool) # (num_persons,)
 
         # Load trajectory data
         curr_traj_data = self._get_trajectory(traj_name)
