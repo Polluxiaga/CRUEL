@@ -401,8 +401,8 @@ def compute_cnnaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 10
-    total_loss = action_loss + alpha * auxiliary_loss
+    alpha = 0.5
+    total_loss = (1 - alpha) * action_loss + alpha * auxiliary_loss
 
     results = {
         "action_loss": action_loss,
@@ -679,8 +679,8 @@ def compute_tokenaux_loss(
     )
 
     # Combine losses with weight
-    alpha = 10
-    total_loss = action_loss + alpha * token_aux_loss
+    alpha = 0.5
+    total_loss = (1 - alpha) * action_loss + alpha * token_aux_loss
 
     results = {
         "action_loss": action_loss,
@@ -1006,7 +1006,13 @@ def personaux_train(
         output_h = person_attention.shape[2] // 32
         output_w = person_attention.shape[3] // 32
         person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+        
         person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+        max_val = person_attention_flattened.max()
+        if max_val > 0:
+            gaze_map_normalized = person_attention_flattened / max_val
+        else:
+            gaze_map_normalized = person_attention_flattened # If all zeros, keep it as is
 
         action_label = action_label.to(device)
 
@@ -1017,7 +1023,7 @@ def personaux_train(
             losses = compute_tokenaux_loss(
             action_label=action_label,
             action_pred=action_pred,
-            gaze_map=person_attention_flattened,
+            gaze_map=gaze_map_normalized,
             attention_scores=attention_scores
             )
             loss = losses["total_loss"]
@@ -1127,7 +1133,13 @@ def personaux_evaluate(
             output_h = person_attention.shape[2] // 32
             output_w = person_attention.shape[3] // 32
             person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+        
             person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+            max_val = person_attention_flattened.max()
+            if max_val > 0:
+                gaze_map_normalized = person_attention_flattened / max_val
+            else:
+                gaze_map_normalized = person_attention_flattened # If all zeros, keep it as is
 
 
             action_label = action_label.to(device)
@@ -1139,7 +1151,7 @@ def personaux_evaluate(
             losses = compute_tokenaux_loss(
                 action_label=action_label,
                 action_pred=action_pred,
-                gaze_map=person_attention_flattened,
+                gaze_map=gaze_map_normalized,
                 attention_scores=attention_scores
             )
             for key, value in losses.items():
