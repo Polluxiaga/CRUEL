@@ -241,7 +241,7 @@ class gaze_dataset(Dataset):
             print(f"Failed to load image {image_path}: {e}")
             # Consider returning a dummy black image or raising an error if image is critical
             # For robustness, returning a dummy image (e.g., zeros) might be better than crashing
-            H, W = self.image_size
+            W, H = self.image_size
             return torch.zeros((3, H, W), dtype=torch.float32)
 
 
@@ -290,7 +290,7 @@ class gaze_dataset(Dataset):
         """
         Load mask for person_id at given frame from LMDB cache, return tensor HxW bool.
         """
-        H, W = self.image_size
+        W, H = self.image_size
         dummy_mask = torch.zeros((H, W), dtype=torch.bool)
         
         mask_key = f"{trajectory_name}_{time}_masks".encode()
@@ -330,7 +330,7 @@ class gaze_dataset(Dataset):
             
         fixations_df = self.fixations_cache[trajectory_name]
         
-        H, W = self.image_size
+        W, H = self.image_size
         dummy_attention_map = torch.zeros((1, H, W), dtype=torch.float32)
 
         try:
@@ -457,7 +457,7 @@ class gaze_dataset(Dataset):
         
         # Handle empty person case
         if len(person_ids) == 0:
-            H, W = self.image_size
+            W, H = self.image_size
             # Create dummy tensors with correct dimensions
             person_masks = torch.zeros((1, self.context_size + 1, H, W), dtype=torch.bool)
             select_labels = torch.zeros((1,), dtype=torch.bool)

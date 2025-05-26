@@ -221,3 +221,108 @@ class base_model(nn.Module):
     def _capture_obs_features_grad(self, grad):
         # 保存obs_features的梯度 (在backward时触发)
         self._grad_obs_features = grad """
+    
+
+class channel_model(nn.Module):
+    def __init__(
+        self,
+        method: str = "base",
+        context_size: int = 5,
+        len_traj_pred: int = 3,
+        encoder: Optional[str] = "efficientnet-b0",
+        encoding_size: Optional[int] = 512,
+        mha_num_attention_heads: Optional[int] = 2,
+        mha_num_attention_layers: Optional[int] = 2,
+        mha_ff_dim_factor: Optional[int] = 4,
+    ) -> None:
+        
+        super(channel_model, self).__init__()
+        self.method = method
+        self.context_size = context_size
+        self.len_traj_pred = len_traj_pred
+        self.encoding_size = encoding_size
+        self.num_action_params = 2
+        self.mha_num_attention_heads = mha_num_attention_heads
+        self.mha_num_attention_layers = mha_num_attention_layers
+        self.mha_ff_dim_factor = mha_ff_dim_factor
+
+        if encoder.split("-")[0] == "efficientnet":
+            self.obs_encoder = EfficientNet.from_name(encoder, in_channels=4)  # context
+            self.num_obs_features = self.obs_encoder._fc.in_features
+
+        if self.num_obs_features != self.encoding_size:
+            self.compress_obs_enc = nn.Linear(self.num_obs_features, self.encoding_size)
+        else:
+            self.compress_obs_enc = nn.Identity()
+
+        self.decoder = None
+        self.action_predictor = nn.Sequential(
+            nn.Linear(32, self.len_traj_pred * self.num_action_params),
+        )
+
+    def forward(self, obs_img: torch.tensor, person_attention) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        #  第一次forward时初始化解码器
+        if self.decoder is None:
+            # 获取一个样本的特征图大小
+            with torch.no_grad():
+                sample_rgb = obs_img[0:1, 0:3]
+                sample_attn = person_attention[0:1, 0:1]
+                sample_input = torch.cat([sample_rgb, sample_attn], dim=1)
+                sample_features = self.obs_encoder.extract_features(sample_input)
+                H_feature = sample_features.shape[2]  # H/32
+                W_feature = sample_features.shape[3]  # W/32
+            
+            self.decoder = bc_MultiLayerDecoder(
+                embed_dim=self.encoding_size,
+                seq_len=(self.context_size+1) * H_feature * W_feature,
+                output_layers=[256, 128, 64, 32],
+                nhead=self.mha_num_attention_heads,
+                num_layers=self.mha_num_attention_layers,
+                ff_dim_factor=self.mha_ff_dim_factor,
+            ).to(obs_img.device)  # 确保在同一设备上
+
+        # 将输入拆分为 (context_size+1) 个图像
+        obs_img = torch.split(obs_img, 3, dim=1)  # [batch_size, 3, H, W]*(context_size+1)
+        person_attention = torch.split(person_attention, 1, dim =1)  # [batch_size, H, W]*(context_size+1)
+
+        #  合并RGB和attention通道
+        combined_input=[]
+        for rgb, attn in zip(obs_img, person_attention):
+            combined = torch.cat([rgb, attn], dim=1)  # [batch_size, 4, H, W]
+            combined_input.append(combined)
+
+        combined_input = torch.concat(combined_input, dim=0)  # [batch_size*(context_size+1), 4, H, W]
+
+        # 使用4通道特征提取
+        obs_features = self.obs_encoder.extract_features(combined_input)  # [N, 1280, H/32, W/32]
+        N, C, H, W = obs_features.shape  # N = batch_size * (context_size+1)
+
+        # 继续原有的处理流程
+        obs_encoding = obs_features.permute(0, 2, 3, 1)  # [N, H/32, W/32, 1280]
+        obs_encoding = obs_encoding.reshape(N, H*W, C)  # [N, H/32*W/32, 1280]
+
+        if self.obs_encoder._global_params.include_top:
+            obs_encoding = self.obs_encoder._dropout(obs_encoding)
+        
+        # 压缩到指定维度
+        obs_encoding = self.compress_obs_enc(obs_encoding)  # [N, H/32*W/32, encoding_size]
+        
+        # 重塑为序列形式
+        obs_encoding = obs_encoding.reshape(
+            (self.context_size+1, -1, H*W, self.encoding_size)
+        )  # [context_size+1, batch_size, H/32*W/32, encoding_size]
+        
+        # 转置为transformer期望的输入格式
+        tokens = obs_encoding.permute(1, 0, 2, 3)  # [batch_size, context_size+1, H/32*W/32, encoding_size]
+        batch_size = tokens.shape[0]
+        tokens = tokens.reshape(batch_size, (self.context_size+1)*H*W, self.encoding_size)  # [batch_size, (context_size+1)*H/32*W/32, encoding_size]
+        
+        # 3. Transformer解码器处理
+        final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
+        action_pred = self.action_predictor(final_repr)
+        action_pred = action_pred.reshape(
+            (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
+        )
+        action_pred = torch.cumsum(action_pred, dim=1)  # 将位置增量累计为 waypoints
+        
+        return action_pred, attention_scores
