@@ -1444,6 +1444,199 @@ def personchannel_evaluate(
 
 ###################################################################################################
 
+def gazechannel_train(
+    model: nn.Module,
+    optimizer: Adam,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int,
+    print_log_freq: int = 10,
+    wandb_log_freq: int = 10,
+    image_log_freq: int = 1000,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    use_tqdm: bool = True,
+):
+    """
+    Train the model for one epoch.
+
+    Args:
+        model: model to train
+        optimizer: optimizer to use
+        dataloader: dataloader for training
+        transform: transform to use
+        device: device to use
+        run_folder: folder to save images to
+        epoch: current epoch
+        print_log_freq: how often to print loss
+        image_log_freq: how often to log images
+        num_images_log: number of images to log
+        use_wandb: whether to use wandb
+        use_tqdm: whether to use tqdm
+    """
+    model = model.to(device)
+    model.train()
+    scaler = GradScaler()
+
+    action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
+    action_waypts_cos_sim_logger = Logger("action_waypts_cos_sim", "train", window_size=print_log_freq)
+    
+    loggers = {
+        "action_loss": action_loss_logger,
+        "action_waypts_cos_sim": action_waypts_cos_sim_logger,
+    }
+
+    num_batches = len(dataloader)
+    tqdm_iter = tqdm.tqdm(
+        dataloader,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Training epoch {epoch}",
+    )
+    for i, data in enumerate(tqdm_iter):
+        (
+            obs_image, # [batch_size, 3 * (context_size+1), H, W]
+            gaze_maps, # [batch_size, context_size+1, H, W]
+            _, # [batch_size, num_persons, context_size+1, H, W]
+            _, # [batch_size, num_persons]
+            action_label,
+        ) = data
+
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
+
+        obs_images = torch.split(obs_image, 3, dim=1)  # [batch_size, 3, H, W] * (context_size+1)
+        obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
+        obs_image = torch.cat(obs_images, dim=1)  # [batch_size, 3 * (context_size+1), H, W]
+
+        gaze_maps = gaze_maps.to(device)
+
+        action_label = action_label.to(device)
+
+        optimizer.zero_grad()
+
+        with autocast():
+            action_pred, attention_scores = model(obs_image, gaze_maps)
+            losses = compute_baseloss(
+            action_label=action_label, action_pred=action_pred,)
+            loss = losses["action_loss"]
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        for key, value in losses.items():
+            if key in loggers:
+                logger = loggers[key]
+                logger.log_data(value.item())
+
+        log_data(
+            i=i,
+            epoch=epoch,
+            num_batches=num_batches,
+            run_folder=run_folder,
+            num_images_log=num_images_log,
+            loggers=loggers,
+            obs_images=viz_obs_images,
+            action_pred=action_pred,
+            attention_scores=attention_scores,
+            action_label=action_label,
+            use_wandb=use_wandb,
+            mode="train",
+            use_latest=True,
+            wandb_log_freq=wandb_log_freq,
+            print_log_freq=print_log_freq,
+            image_log_freq=image_log_freq,
+        )
+
+
+def gazechannel_evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int = 0,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    eval_fraction: float = 1.0,
+    use_tqdm: bool = True,
+):
+    """
+    Evaluate the model on the given evaluation dataset.
+    """
+
+    # 设置模型为评估模式
+    model = model.to(device)
+    model.eval()
+
+    # 初始化日志器
+    loggers = {
+        "action_loss": Logger("action_loss", "test"),
+        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
+    }
+
+    num_batches = max(int(len(dataloader) * eval_fraction), 1)
+
+    tqdm_iter = tqdm.tqdm(
+        itertools.islice(dataloader, num_batches),
+        total=num_batches,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Evaluating for epoch {epoch}",
+    )
+    
+    with torch.no_grad():
+        for i, data in enumerate(tqdm_iter):
+            obs_image, gaze_maps, _, _, action_label= data
+    
+            viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
+            obs_images = torch.split(obs_image, 3, dim=1)
+            obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
+            obs_image = torch.cat(obs_images, dim=1)
+
+            gaze_maps = gaze_maps.to(device)
+
+            action_label = action_label.to(device)
+
+            # 前向推理
+            action_pred, attention_scores = model(obs_image, gaze_maps)
+
+            # 计算损失并记录（注意：此处直接用 .item() 记录数值）
+            losses = compute_baseloss(action_label=action_label, action_pred=action_pred,)
+            for key, value in losses.items():
+                if key in loggers:
+                    loggers[key].log_data(value.item())
+
+            # 只对最后一个batch进行可视化
+            if i == num_batches - 1: 
+                log_data(
+                    i=0,
+                    epoch=epoch,
+                    num_batches=num_batches,
+                    run_folder=run_folder,
+                    num_images_log=num_images_log,
+                    loggers=loggers,
+                    obs_images=viz_obs_images,
+                    action_pred=action_pred,
+                    attention_scores=attention_scores,
+                    action_label=action_label,
+                    use_wandb=use_wandb,
+                    mode="test",
+                    use_latest=False,
+                    wandb_log_freq=1,
+                    print_log_freq=1,
+                    image_log_freq=1,
+                    wandb_increment_step=False,
+                )
+
+    # 返回主要评估指标
+    return loggers["action_loss"].average()
+
+###################################################################################################
+
 def compute_selloss(
     select_label: torch.Tensor,
     action_label: torch.Tensor,
