@@ -106,7 +106,7 @@ def main(config):
         )
 
     test_dataset = ConcatDataset(test_dataset)
-    if method == "sel" or method == "personaux"or method == "personchannel":
+    if method == "sel" or method == "personaux" or method == "personchannel":
         test_loader = DataLoader(
             test_dataset,
             batch_size=config["batch_size"],
@@ -133,7 +133,7 @@ def main(config):
 
 
     # Create the model
-    if method == "personchannel":
+    if method == "gazechannel" or method == "personchannel":
         model = channel_model(
             method=method,
             context_size=config["context_size"],

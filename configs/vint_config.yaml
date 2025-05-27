@@ -4,11 +4,11 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-gpu_id: 2
-method: "personaux" # base or cnnaux or tokenaux or personaux or personchannel or sel
+gpu_id: 3
+method: "personaux" # base or cnnaux or tokenaux or personaux or gazechannel or personchannel or sel
 use_wandb: True # set to false if you don't want to log to wandb
 train: True
-batch_size: 64
+batch_size: 128
 epochs: 100
 num_workers: 8
 lr: 5e-4
