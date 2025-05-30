@@ -42,9 +42,9 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
         return src, attn_weights  # 直接返回注意力权重
 
 
-class bc_MultiLayerDecoder(nn.Module):
+class base_MultiLayerDecoder(nn.Module):
     def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, ff_dim_factor=4):
-        super(bc_MultiLayerDecoder, self).__init__()
+        super(base_MultiLayerDecoder, self).__init__()
         
         self.positional_encoding = PositionalEncoding(embed_dim, max_seq_len=seq_len)
         
@@ -122,7 +122,7 @@ class base_model(nn.Module):
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
         )
 
-    def forward(self, obs_img: torch.tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, obs_img: torch.tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         #  第一次forward时初始化解码器
         if self.decoder is None:
             # 获取一个样本的特征图大小
@@ -131,7 +131,7 @@ class base_model(nn.Module):
                 H_feature = sample_features.shape[2]  # H/32
                 W_feature = sample_features.shape[3]  # W/32
             
-            self.decoder = bc_MultiLayerDecoder(
+            self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
                 seq_len=(self.context_size+1) * H_feature * W_feature,
                 output_layers=[256, 128, 64, 32],
@@ -260,19 +260,19 @@ class channel_model(nn.Module):
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
         )
 
-    def forward(self, obs_img: torch.tensor, person_attention) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, obs_img: torch.tensor, attention) -> Tuple[torch.Tensor, torch.Tensor]:
         #  第一次forward时初始化解码器
         if self.decoder is None:
             # 获取一个样本的特征图大小
             with torch.no_grad():
                 sample_rgb = obs_img[0:1, 0:3]
-                sample_attn = person_attention[0:1, 0:1]
+                sample_attn = attention[0:1, 0:1]
                 sample_input = torch.cat([sample_rgb, sample_attn], dim=1)
                 sample_features = self.obs_encoder.extract_features(sample_input)
                 H_feature = sample_features.shape[2]  # H/32
                 W_feature = sample_features.shape[3]  # W/32
             
-            self.decoder = bc_MultiLayerDecoder(
+            self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
                 seq_len=(self.context_size+1) * H_feature * W_feature,
                 output_layers=[256, 128, 64, 32],
@@ -283,11 +283,11 @@ class channel_model(nn.Module):
 
         # 将输入拆分为 (context_size+1) 个图像
         obs_img = torch.split(obs_img, 3, dim=1)  # [batch_size, 3, H, W]*(context_size+1)
-        person_attention = torch.split(person_attention, 1, dim =1)  # [batch_size, H, W]*(context_size+1)
+        attention = torch.split(attention, 1, dim =1)  # [batch_size, H, W]*(context_size+1)
 
         #  合并RGB和attention通道
         combined_input=[]
-        for rgb, attn in zip(obs_img, person_attention):
+        for rgb, attn in zip(obs_img, attention):
             combined = torch.cat([rgb, attn], dim=1)  # [batch_size, 4, H, W]
             combined_input.append(combined)
 
@@ -318,6 +318,115 @@ class channel_model(nn.Module):
         tokens = tokens.reshape(batch_size, (self.context_size+1)*H*W, self.encoding_size)  # [batch_size, (context_size+1)*H/32*W/32, encoding_size]
         
         # 3. Transformer解码器处理
+        final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
+        action_pred = self.action_predictor(final_repr)
+        action_pred = action_pred.reshape(
+            (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
+        )
+        action_pred = torch.cumsum(action_pred, dim=1)  # 将位置增量累计为 waypoints
+        
+        return action_pred, attention_scores
+    
+
+class catoken_model(nn.Module):
+    def __init__(
+        self,
+        method: str = "base",
+        context_size: int = 5,
+        len_traj_pred: int = 3,
+        encoder: Optional[str] = "efficientnet-b0",
+        encoding_size: Optional[int] = 512,
+        mha_num_attention_heads: Optional[int] = 2,
+        mha_num_attention_layers: Optional[int] = 2,
+        mha_ff_dim_factor: Optional[int] = 4,
+    ) -> None:
+        
+        super(catoken_model, self).__init__()
+        self.method = method
+        self.context_size = context_size
+        self.len_traj_pred = len_traj_pred
+        self.encoding_size = encoding_size
+        self.num_action_params = 2
+        self.mha_num_attention_heads = mha_num_attention_heads
+        self.mha_num_attention_layers = mha_num_attention_layers
+        self.mha_ff_dim_factor = mha_ff_dim_factor
+
+        # Separate encoders for RGB and attention
+        if encoder.split("-")[0] == "efficientnet":
+            self.rgb_encoder = EfficientNet.from_name(encoder, in_channels=3)  # RGB encoder
+            self.attn_encoder = EfficientNet.from_name(encoder, in_channels=1)  # Attention encoder
+            self.num_obs_features = self.rgb_encoder._fc.in_features
+
+        if self.num_obs_features != self.encoding_size:
+            self.compress_rgb_enc = nn.Linear(self.num_obs_features, self.encoding_size)
+            self.compress_attn_enc = nn.Linear(self.num_obs_features, self.encoding_size)
+        else:
+            self.compress_rgb_enc = nn.Identity()
+            self.compress_attn_enc = nn.Identity()
+
+        # Global average pooling for attention features
+        self.attn_pool = nn.AdaptiveAvgPool2d(1)
+        
+        self.decoder = None
+        self.action_predictor = nn.Sequential(
+            nn.Linear(32, self.len_traj_pred * self.num_action_params),
+        )
+
+    def forward(self, obs_img: torch.tensor, attention) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.decoder is None:
+            with torch.no_grad():
+                sample_rgb = obs_img[0:1, 0:3]
+                sample_features = self.rgb_encoder.extract_features(sample_rgb)
+                H_feature = sample_features.shape[2]  # H/32
+                W_feature = sample_features.shape[3]  # W/32
+            
+            # Adjust sequence length to account for RGB spatial tokens + attention tokens
+            total_seq_len = (self.context_size + 1) * (H_feature * W_feature + 1)  # +1 for each attention token
+            
+            self.decoder = base_MultiLayerDecoder(
+                embed_dim=self.encoding_size,
+                seq_len=total_seq_len,
+                output_layers=[256, 128, 64, 32],
+                nhead=self.mha_num_attention_heads,
+                num_layers=self.mha_num_attention_layers,
+                ff_dim_factor=self.mha_ff_dim_factor,
+            ).to(obs_img.device)
+
+        # Split inputs
+        obs_img = torch.split(obs_img, 3, dim=1)  # [batch_size, 3, H, W] * (context_size+1)
+        attention = torch.split(attention, 1, dim=1)  # [batch_size, 1, H, W] * (context_size+1)
+
+        # Process RGB images
+        rgb_features_list = []
+        attn_features_list = []
+        
+        for rgb, attn in zip(obs_img, attention):
+            # Process RGB
+            rgb_feat = self.rgb_encoder.extract_features(rgb)  # [batch_size, C, H/32, W/32]
+            N, C, H, W = rgb_feat.shape
+            rgb_feat = rgb_feat.permute(0, 2, 3, 1).reshape(N, H * W, C)  # [batch_size, H/32*W/32, C]
+            rgb_feat = self.compress_rgb_enc(rgb_feat)
+            rgb_features_list.append(rgb_feat)
+
+            # Process attention
+            attn_feat = self.attn_encoder.extract_features(attn)  # [batch_size, C, H/32, W/32]
+            attn_feat = self.attn_pool(attn_feat).squeeze(-1).squeeze(-1)  # [batch_size, C]
+            attn_feat = self.compress_attn_enc(attn_feat)
+            attn_features_list.append(attn_feat)
+
+        # Combine features
+        rgb_features = torch.stack(rgb_features_list, dim=1)  # [batch_size, context_size+1, H/32*W/32, encoding_size]
+        attn_features = torch.stack(attn_features_list, dim=1)  # [batch_size, context_size+1, encoding_size]
+
+        # Flatten spatial tokens and append attention tokens
+        batch_size = rgb_features.shape[0]
+        seq_len = rgb_features.shape[1] * rgb_features.shape[2] + attn_features.shape[1]  # (context_size+1) * [(H/32*W/32)+1]
+        device = obs_img[0].device
+        tokens = torch.zeros((batch_size, seq_len, self.encoding_size), device=device)
+        tokens[:, :rgb_features.shape[1] * rgb_features.shape[2], :] = rgb_features.reshape(batch_size, -1, self.encoding_size)
+        tokens[:, rgb_features.shape[1] * rgb_features.shape[2]:, :] = attn_features
+
+        # Transformer decoder
         final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
         action_pred = self.action_predictor(final_repr)
         action_pred = action_pred.reshape(

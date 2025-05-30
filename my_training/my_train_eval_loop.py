@@ -3,7 +3,7 @@ import os
 from typing import Optional
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, tokenaux_train, tokenaux_evaluate, personaux_train, personaux_evaluate, gazechannel_train, gazechannel_evaluate, personchannel_train, personchannel_evaluate, sel_train, sel_evaluate
+from my_training.my_train_utils import base_train, base_evaluate, cnnaux_train, cnnaux_evaluate, gazeaux_train, gazeaux_evaluate, personaux_train, personaux_evaluate, gazechannel_train, gazechannel_evaluate, personchannel_train, personchannel_evaluate, gazetoken_train, gazetoken_evaluate, persontoken_train, persontoken_evaluate, sel_train, sel_evaluate
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -101,36 +101,6 @@ def train_eval_loop(
                     num_images_log=num_images_log,
                     use_wandb=use_wandb,
                 )
-            elif train_method == "personchannel":
-                personchannel_train(
-                    model=model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "gazechannel":
-                gazechannel_train(
-                    model=model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
             elif train_method == "base":
                 base_train(
                     model=model,
@@ -161,8 +131,8 @@ def train_eval_loop(
                     num_images_log=num_images_log,
                     use_wandb=use_wandb,
                 )
-            elif train_method == "tokenaux":
-                tokenaux_train(
+            elif train_method == "gazeaux":
+                gazeaux_train(
                     model=model,
                     optimizer=optimizer,
                     dataloader=train_loader,
@@ -191,35 +161,71 @@ def train_eval_loop(
                     num_images_log=num_images_log,
                     use_wandb=use_wandb,
                 )
+            elif train_method == "gazechannel":
+                gazechannel_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "personchannel":
+                personchannel_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "gazetoken":
+                gazetoken_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
+            elif train_method == "persontoken":
+                persontoken_train(
+                    model=model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
 
         # Evaluation
         test_loss = None
         if train_method == "sel":
             test_loss = sel_evaluate(
-                model=model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "personchannel":
-            test_loss = personchannel_evaluate(
-                model=model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "gazechannel":
-            test_loss = gazechannel_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
@@ -254,8 +260,8 @@ def train_eval_loop(
                 use_wandb=use_wandb,
                 eval_fraction=eval_fraction,
             )
-        elif train_method == "tokenaux":
-            test_loss = tokenaux_evaluate(
+        elif train_method == "gazeaux":
+            test_loss = gazeaux_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
@@ -268,6 +274,54 @@ def train_eval_loop(
             )
         elif train_method == "personaux":
             test_loss = personaux_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "gazechannel":
+            test_loss = gazechannel_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "personchannel":
+            test_loss = personchannel_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "gazetoken":
+            test_loss = gazetoken_evaluate(
+                model=model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "persontoken":
+            test_loss = persontoken_evaluate(
                 model=model,
                 dataloader=test_loader,
                 transform=transform,
