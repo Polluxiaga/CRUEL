@@ -6,6 +6,7 @@ import cv2
 from typing import Optional
 import wandb
 import seaborn as sns
+import matplotlib.gridspec as gridspec
 
 VIZ_IMAGE_SIZE = (500, 400)
 FEATURE_SIZE = (4, 5)
@@ -107,74 +108,106 @@ def compute_attention_map(attention_scores: np.ndarray, time_idx: int) -> np.nda
     H, W = FEATURE_SIZE
     attention_map = frame_attention.reshape(H, W)
     
-    return attention_map     
+    return attention_map
 
 
-def bc_draw(
-    obs_imgs: list,  # List of 6 PIL Images
+def draw(
+    obs_imgs: list,
     pred_waypoints: np.ndarray,
     label_waypoints: np.ndarray,
-    attention_scores: np.ndarray,  # [seq_len, seq_len]
+    attention_scores: np.ndarray,
     save_path: Optional[str] = None,
     display: Optional[bool] = False,
 ):
     """
-    创建3x3的可视化布局:
-    - 第一行：轨迹预测(1列) + 注意力图(2-3列)
-    - 第二行和第三行：6张观测图的attention map叠加图
+    Creates a 3x3 visualization layout:
+    - Row 1, Column 1: Trajectory prediction
+    - Row 1, Column 2: Full attention map
+    - Row 1, Column 3: Bar chart of attention received by each token
+    - Rows 2 & 3: 6 observation image attention map overlays
     """
-    # 创建3x3布局
-    fig, axes = plt.subplots(3, 3, figsize=(24, 24))
-    
-    # 第一行第一列：轨迹预测
+    fig = plt.figure(figsize=(24, 24)) # Revert to 3x3 figsize
+    gs = gridspec.GridSpec(3, 3, figure=fig) # Revert to 3x3 GridSpec
+
+    # Row 1, Column 1: Trajectory Prediction
+    ax_traj_pred = fig.add_subplot(gs[0, 0])
     plot_trajs_and_points(
-        axes[0, 0],
+        ax_traj_pred,
         [pred_waypoints, label_waypoints],
         traj_colors=[CYAN, MAGENTA],
     )
-    axes[0, 0].set_title("Action Prediction")
+    ax_traj_pred.set_title("Action Prediction", fontsize=18)
 
-    # 第一行第二、三列：注意力图
-    attention_plot = sns.heatmap(
-        attention_scores, 
-        cmap="viridis", 
-        annot=False, 
-        fmt=".2f", 
-        ax=axes[0, 1:].ravel()[0],
-        square=True
+    # Row 1, Column 2: Full Attention Map
+    ax_full_attn_map = fig.add_subplot(gs[0, 1]) # Now occupies a single column
+    sns.heatmap(
+        attention_scores,
+        cmap="viridis",
+        annot=False,
+        fmt=".2f",
+        ax=ax_full_attn_map,
+        square=True,
+        cbar_kws={'shrink': 0.8, 'label': 'Attention Score'}
     )
-    attention_plot.set_title("Attention Map")
-    axes[0, 2].remove()
+    ax_full_attn_map.set_title("Overall Attention Map (All Tokens)", fontsize=18)
+    ax_full_attn_map.set_xlabel("Key Tokens", fontsize=14)
+    ax_full_attn_map.set_ylabel("Query Tokens", fontsize=14)
+    ax_full_attn_map.tick_params(labelsize=10)
+
+    # Row 1, Column 3: Bar chart of attention received by each token
+    ax_received_attn = fig.add_subplot(gs[0, 2])
+
+    # Calculate attention received by each token (sum of each column)
+    # The sum along axis=0 gives the total attention received by each key token from all queries.
+    attention_received_by_token = attention_scores.sum(axis=0) # Shape: [seq_len]
+
+    # Create the bar plot
+    bars = ax_received_attn.bar(
+        np.arange(attention_received_by_token.shape[0]),
+        attention_received_by_token,
+        color='skyblue'
+    )
+    ax_received_attn.set_title("Attention Received by Each Token", fontsize=18)
+    ax_received_attn.set_xlabel("Token Index", fontsize=14)
+    ax_received_attn.set_ylabel("Total Attention Received", fontsize=14)
+    ax_received_attn.tick_params(labelsize=12)
+    ax_received_attn.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Add numerical labels on top of the bars
+    for bar in bars:
+        height = bar.get_height()
+        ax_received_attn.annotate(f'{height:.2f}',
+                                  xy=(bar.get_x() + bar.get_width() / 2, height),
+                                  xytext=(0, 3),  # 3 points vertical offset
+                                  textcoords="offset points",
+                                  ha='center', va='bottom', fontsize=10)
     
-    # 第二行和第三行：6张attention map叠加图
+    # Rows 2 & 3: 6 Observation Image Attention Map Overlays
+    num_frames = len(obs_imgs)
     for idx, img in enumerate(obs_imgs):
-        row = 1 + idx // 3
+        if idx >= num_frames:
+            break
+            
+        row = 1 + idx // 3 # Now starts from row 2 (index 1)
         col = idx % 3
         
-        # 计算当前时间步的attention map
+        ax_img_overlay = fig.add_subplot(gs[row, col])
+        
         attention_map = compute_attention_map(attention_scores, idx)
         
-        # Convert PIL Image to numpy array
         obs_img_np = np.array(img)
-        
-        # Get image dimensions
         h, w = obs_img_np.shape[:2]
         
-        # Resize attention map to match image dimensions
         heatmap = cv2.resize(attention_map, (w, h))
         heatmap = np.uint8(255 * heatmap)
         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        
-        # Convert BGR to RGB
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
-        # 叠加热力图到观测图
         heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
         
-        # 显示叠加后的图像
-        axes[row, col].imshow(heatmap_img)
-        axes[row, col].set_title(f"Frame {idx+1} with Attention Map")
-        axes[row, col].axis('off')
+        ax_img_overlay.imshow(heatmap_img)
+        ax_img_overlay.set_title(f"Frame {idx+1} with Attention Map", fontsize=16)
+        ax_img_overlay.axis('off')
 
     plt.tight_layout()
     
@@ -185,7 +218,7 @@ def bc_draw(
         plt.close(fig)
 
 
-def bc_visualize(
+def visualize(
     batch_obs_images: np.ndarray,  # [B, T, 3, H, W]
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
@@ -240,7 +273,7 @@ def bc_visualize(
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
 
-        bc_draw(
+        draw(
             obs_imgs,
             pred_waypoints,
             label_waypoints,

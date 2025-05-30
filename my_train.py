@@ -33,14 +33,14 @@ import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
 from my_data.my_dataset import gaze_dataset
-from my_model.backbone import base_model, channel_model
+from my_model.backbone import base_model, channel_model, catoken_model
 from my_training.my_train_utils import person_collate_fn, base_collate_fn
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
 def main(config):
 
-    torch.set_num_threads(8)
+    torch.set_num_threads(4)
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -80,7 +80,7 @@ def main(config):
 
 
     train_dataset = ConcatDataset(train_dataset)
-    if method == "sel" or method == "personaux" or method == "personchannel":
+    if method == "sel" or method == "personaux" or method == "personchannel" or method =="persontoken":
         train_loader = DataLoader(
             train_dataset,
             batch_size=config["batch_size"],
@@ -106,7 +106,7 @@ def main(config):
         )
 
     test_dataset = ConcatDataset(test_dataset)
-    if method == "sel" or method == "personaux" or method == "personchannel":
+    if method == "sel" or method == "personaux" or method == "personchannel" or method == "persontoken":
         test_loader = DataLoader(
             test_dataset,
             batch_size=config["batch_size"],
@@ -135,6 +135,17 @@ def main(config):
     # Create the model
     if method == "gazechannel" or method == "personchannel":
         model = channel_model(
+            method=method,
+            context_size=config["context_size"],
+            len_traj_pred=config["len_traj_pred"],
+            encoder=config["obs_encoder"],
+            encoding_size=config["encoding_size"],
+            mha_num_attention_heads=config["mha_num_attention_heads"],
+            mha_num_attention_layers=config["mha_num_attention_layers"],
+            mha_ff_dim_factor=config["mha_ff_dim_factor"],
+        )
+    elif method == "gazetoken" or method == "persontoken":
+        model = catoken_model(
             method=method,
             context_size=config["context_size"],
             len_traj_pred=config["len_traj_pred"],
