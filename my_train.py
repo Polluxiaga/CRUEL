@@ -329,6 +329,7 @@ if __name__ == "__main__":
             wandb.config.update(config, allow_val_change=True)
         else:
             wandb.init(
+                mode="offline",
                 project=config["project_name"],
                 settings=wandb.Settings(start_method="fork"),
                 entity="polluxiaga-nanjing-university",

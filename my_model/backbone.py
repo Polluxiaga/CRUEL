@@ -381,7 +381,7 @@ class catoken_model(nn.Module):
                 W_feature = sample_features.shape[3]  # W/32
             
             # Adjust sequence length to account for RGB spatial tokens + attention tokens
-            total_seq_len = (self.context_size + 1) * (H_feature * W_feature + 1)  # +1 for each attention token
+            total_seq_len = (self.context_size + 1) * H_feature * W_feature *2  # +1 for each attention token
             
             self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
@@ -410,7 +410,7 @@ class catoken_model(nn.Module):
 
             # Process attention
             attn_feat = self.attn_encoder.extract_features(attn)  # [batch_size, C, H/32, W/32]
-            attn_feat = self.attn_pool(attn_feat).squeeze(-1).squeeze(-1)  # [batch_size, C]
+            attn_feat = attn_feat.permute(0 ,2 , 3, 1).reshape(N, H*W, C)  # [batch_size, C]
             attn_feat = self.compress_attn_enc(attn_feat)
             attn_features_list.append(attn_feat)
 
@@ -420,11 +420,11 @@ class catoken_model(nn.Module):
 
         # Flatten spatial tokens and append attention tokens
         batch_size = rgb_features.shape[0]
-        seq_len = rgb_features.shape[1] * rgb_features.shape[2] + attn_features.shape[1]  # (context_size+1) * [(H/32*W/32)+1]
+        seq_len = rgb_features.shape[1] * rgb_features.shape[2] + attn_features.shape[1]*attn_features.shape[2]  # (context_size+1) * [(H/32*W/32)+1]
         device = obs_img[0].device
         tokens = torch.zeros((batch_size, seq_len, self.encoding_size), device=device)
         tokens[:, :rgb_features.shape[1] * rgb_features.shape[2], :] = rgb_features.reshape(batch_size, -1, self.encoding_size)
-        tokens[:, rgb_features.shape[1] * rgb_features.shape[2]:, :] = attn_features
+        tokens[:, rgb_features.shape[1] * rgb_features.shape[2]:, :] = attn_features.reshape(batch_size, -1, self.encoding_size)
 
         # Transformer decoder
         final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
