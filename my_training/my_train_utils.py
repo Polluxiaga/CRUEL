@@ -132,57 +132,7 @@ class Logger:
         return self.average()
 
 
-def base_log_data(
-    i,
-    epoch,
-    num_batches,
-    run_folder,
-    num_images_log,
-    loggers,
-    obs_images,
-    action_pred,
-    attention_scores,
-    action_label,
-    use_wandb,
-    mode,
-    use_latest,
-    wandb_log_freq=1,
-    print_log_freq=1,
-    image_log_freq=1,
-    wandb_increment_step=True,
-):
-    """
-    Log data to wandb and print to console.
-    """
-    data_log = {}
-    for key, logger in loggers.items():
-        if use_latest:
-            data_log[logger.full_name()] = logger.latest()
-            if i % print_log_freq == 0 and print_log_freq != 0:
-                print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
-        else:
-            data_log[logger.full_name()] = logger.average()
-            if i % print_log_freq == 0 and print_log_freq != 0:
-                print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
-
-    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-        wandb.log(data_log, commit=wandb_increment_step)
-
-    if image_log_freq != 0 and i % image_log_freq == 0:
-        visualize(
-            batch_obs_images=ts2np(obs_images),
-            batch_pred_waypoints=ts2np(action_pred),
-            batch_label_waypoints=ts2np(action_label),
-            attention_scores=ts2np(attention_scores),
-            mode=mode,
-            save_folder=run_folder,
-            epoch=epoch,
-            num_images_log=num_images_log,
-            use_wandb=use_wandb,
-        )
-
-
-def catoken_log_data(
+def log_data(
     i,
     epoch,
     num_batches,
@@ -357,12 +307,12 @@ def base_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -436,7 +386,7 @@ def base_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -614,12 +564,12 @@ def cnnaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -701,7 +651,7 @@ def cnnaux_evaluate(
     
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -897,12 +847,12 @@ def gazeaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -989,7 +939,7 @@ def gazeaux_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1144,12 +1094,12 @@ def personaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -1255,7 +1205,7 @@ def personaux_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1367,12 +1317,12 @@ def gazechannel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -1448,7 +1398,7 @@ def gazechannel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1571,12 +1521,12 @@ def personchannel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -1662,7 +1612,7 @@ def personchannel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1774,12 +1724,12 @@ def gazetoken_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        catoken_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -1855,7 +1805,7 @@ def gazetoken_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                catoken_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1978,12 +1928,12 @@ def persontoken_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        catoken_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -2069,7 +2019,7 @@ def persontoken_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                catoken_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -2253,12 +2203,12 @@ def sel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        base_log_data(
+        log_data(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
             run_folder=run_folder,
-            num_images_log=num_images_log,
+            num_images_log=int(num_images_log/3),
             loggers=loggers,
             obs_images=viz_obs_images,
             action_pred=action_pred,
@@ -2345,7 +2295,7 @@ def sel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                base_log_data(
+                log_data(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
