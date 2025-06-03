@@ -5,14 +5,14 @@ run_name: vint
 
 # training setup
 gpu_id: 0
-method: "gazetoken" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or sel
+method: "persontoken" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or sel
 use_wandb: True # set to false if you don't want to log to wandb
 wandb_log_freq: 110 # in iterations
 train: True
-batch_size: 128
+batch_size: 64
 epochs: 200
 num_workers: 8
-lr: 5e-4
+lr: 1e-4
 optimizer: adamw
 clipping: True
 max_norm: 1.
@@ -78,7 +78,7 @@ datasets:
 ## =0 turns off
 print_log_freq: 220 # in iterations
 image_log_freq: 220 # in iterations
-num_images_log: 6 #0 
+num_images_log: 3 #0 
 pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
 eval_freq: 1 # in epochs

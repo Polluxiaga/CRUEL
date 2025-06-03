@@ -364,8 +364,8 @@ class catoken_model(nn.Module):
             self.compress_rgb_enc = nn.Identity()
             self.compress_attn_enc = nn.Identity()
 
-        # Global average pooling for attention features
-        self.attn_pool = nn.AdaptiveAvgPool2d(1)
+        self.rgb_modality_embedding = nn.Parameter(torch.randn(1, 1, encoding_size)* 0.02)
+        self.attn_modality_embedding = nn.Parameter(torch.randn(1, 1, encoding_size)* 0.02)
         
         self.decoder = None
         self.action_predictor = nn.Sequential(
@@ -406,12 +406,14 @@ class catoken_model(nn.Module):
             N, C, H, W = rgb_feat.shape
             rgb_feat = rgb_feat.permute(0, 2, 3, 1).reshape(N, H * W, C)  # [batch_size, H/32*W/32, C]
             rgb_feat = self.compress_rgb_enc(rgb_feat)
+            rgb_feat = rgb_feat + self.rgb_modality_embedding
             rgb_features_list.append(rgb_feat)
 
             # Process attention
             attn_feat = self.attn_encoder.extract_features(attn)  # [batch_size, C, H/32, W/32]
             attn_feat = attn_feat.permute(0 ,2 , 3, 1).reshape(N, H*W, C)  # [batch_size, C]
             attn_feat = self.compress_attn_enc(attn_feat)
+            attn_feat = attn_feat + self.attn_modality_embedding
             attn_features_list.append(attn_feat)
 
         # Combine features
