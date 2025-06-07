@@ -5,7 +5,7 @@ run_name: vint
 
 # training setup
 gpu_id: 0
-method: "persontoken" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or sel
+method: "persontoken" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or obs or sel
 use_wandb: True # set to false if you don't want to log to wandb
 wandb_log_freq: 110 # in iterations
 train: True

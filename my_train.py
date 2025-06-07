@@ -34,12 +34,12 @@ from warmup_scheduler import GradualWarmupScheduler
 
 from my_data.my_dataset import gaze_dataset
 from my_model.backbone import base_model, channel_model, catoken_model
+from my_model.selectors import WinnerSelector
 from my_training.my_train_utils import person_collate_fn, base_collate_fn
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
 def main(config):
-
     torch.set_num_threads(4)
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -80,7 +80,7 @@ def main(config):
 
 
     train_dataset = ConcatDataset(train_dataset)
-    if method == "sel" or method == "personaux" or method == "personchannel" or method =="persontoken":
+    if method == "obs" or method == "sel" or method == "personaux" or method == "personchannel" or method =="persontoken":
         train_loader = DataLoader(
             train_dataset,
             batch_size=config["batch_size"],
@@ -106,7 +106,7 @@ def main(config):
         )
 
     test_dataset = ConcatDataset(test_dataset)
-    if method == "sel" or method == "personaux" or method == "personchannel" or method == "persontoken":
+    if method == "obs" or method == "sel" or method == "personaux" or method == "personchannel" or method == "persontoken":
         test_loader = DataLoader(
             test_dataset,
             batch_size=config["batch_size"],
@@ -133,7 +133,11 @@ def main(config):
 
 
     # Create the model
-    if method == "gazechannel" or method == "personchannel":
+    if method == "obs":
+        model = WinnerSelector(
+            context_size=config["context_size"],
+        )
+    elif method == "gazechannel" or method == "personchannel":
         model = channel_model(
             method=method,
             context_size=config["context_size"],
@@ -329,7 +333,7 @@ if __name__ == "__main__":
             wandb.config.update(config, allow_val_change=True)
         else:
             wandb.init(
-                mode="offline",
+                #mode="offline",
                 project=config["project_name"],
                 settings=wandb.Settings(start_method="fork"),
                 entity="polluxiaga-nanjing-university",
