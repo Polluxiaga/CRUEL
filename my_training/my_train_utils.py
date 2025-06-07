@@ -12,7 +12,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torchvision import transforms
 
 from my_data.my_data_utils import ts2np
-from my_training.my_visualize_utils import visualize
+from my_training.my_visualize_utils import action_visualize, obsp_visualize
 
 
 def base_collate_fn(batch):
@@ -132,7 +132,57 @@ class Logger:
         return self.average()
 
 
-def log_data(
+def obsp_log(
+    i,
+    epoch,
+    num_batches,
+    run_folder,
+    num_images_log,
+    loggers,
+    obs_images,
+    winner_masks,
+    obs_pred,
+    obs_label,
+    use_wandb,
+    mode,
+    use_latest,
+    wandb_log_freq=1,
+    print_log_freq=1,
+    image_log_freq=1,
+    wandb_increment_step=True,
+):
+    """
+    Log data to wandb and print to console.
+    """
+    data_log = {}
+    for key, logger in loggers.items():
+        if use_latest:
+            data_log[logger.full_name()] = logger.latest()
+            if i % print_log_freq == 0 and print_log_freq != 0:
+                print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
+        else:
+            data_log[logger.full_name()] = logger.average()
+            if i % print_log_freq == 0 and print_log_freq != 0:
+                print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
+
+    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
+        wandb.log(data_log, commit=wandb_increment_step)
+
+    if image_log_freq != 0 and i % image_log_freq == 0:
+        obsp_visualize(
+            batch_obs_images=ts2np(obs_images),
+            batch_winner_masks=ts2np(winner_masks),
+            batch_pred_select=ts2np(obs_pred),
+            batch_label_select=ts2np(obs_label),
+            mode=mode,
+            save_folder=run_folder,
+            epoch=epoch,
+            num_images_log=num_images_log,
+            use_wandb=use_wandb,
+        )
+
+
+def action_log(
     i,
     epoch,
     num_batches,
@@ -169,7 +219,7 @@ def log_data(
         wandb.log(data_log, commit=wandb_increment_step)
 
     if image_log_freq != 0 and i % image_log_freq == 0:
-        visualize(
+        action_visualize(
             batch_obs_images=ts2np(obs_images),
             batch_pred_waypoints=ts2np(action_pred),
             batch_label_waypoints=ts2np(action_label),
@@ -307,7 +357,7 @@ def base_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -386,7 +436,7 @@ def base_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -564,7 +614,7 @@ def cnnaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -651,7 +701,7 @@ def cnnaux_evaluate(
     
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -847,7 +897,7 @@ def gazeaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -939,7 +989,7 @@ def gazeaux_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1094,7 +1144,7 @@ def personaux_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -1205,7 +1255,7 @@ def personaux_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1317,7 +1367,7 @@ def gazechannel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -1398,7 +1448,7 @@ def gazechannel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1521,7 +1571,7 @@ def personchannel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -1612,7 +1662,7 @@ def personchannel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1724,7 +1774,7 @@ def gazetoken_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -1805,7 +1855,7 @@ def gazetoken_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -1906,7 +1956,7 @@ def persontoken_train(
         select_mask = (select_labels == 1) & valid_masks  # [B, P]
         select_mask = select_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # [B, P, 1, 1, 1]
 
-        person_masks = person_masks * select_mask.float()  # Zero out invalid masks
+        person_masks = person_masks * select_mask.float()  # Zero out invalid masks, [B, P, C, H, W]
         person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
 
         action_label = action_label.to(device)
@@ -1928,7 +1978,7 @@ def persontoken_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -1986,7 +2036,7 @@ def persontoken_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, person_masks, select_labels, action_label, invalid= data
+            obs_image, _, person_masks, select_labels, action_label, invalid = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -2019,7 +2069,7 @@ def persontoken_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
@@ -2041,6 +2091,321 @@ def persontoken_evaluate(
 
     # 返回主要评估指标
     return loggers["action_loss"].average()
+
+###################################################################################################
+
+def compute_obsloss(
+    true_winners: torch.Tensor, # 这是一个布尔张量，形状为 [B, P]
+    logits: torch.Tensor,     # 模型的输出，形状为 [B, P]，包含 -inf
+    pad: torch.Tensor = None, # 从 obs_train 传入的 padding 掩码，形状为 [B, P]，True 表示 padding
+):
+    """
+    Compute losses and metrics for select prediction.
+    Handles -inf logits for padded entries by masking the loss and metrics.
+    """
+
+    assert logits.shape == true_winners.shape, f"Logits shape {logits.shape} != true_winners shape {true_winners.shape}"
+    if pad is not None:
+        assert logits.shape == pad.shape, f"Logits shape {logits.shape} != pad shape {pad.shape}"
+
+
+    # Convert boolean labels to float for loss computation
+    true_winner_float = true_winners.float()
+
+    # Initialize loss function with reduction='none' to get per-element loss
+    loss_fn = nn.BCEWithLogitsLoss(reduction='none')
+
+    # Calculate per-element loss
+    # select_loss will have shape [B, P]
+    select_loss = loss_fn(logits, true_winner_float)
+
+    # Convert logits to predicted probabilities using sigmoid
+    predicted_probs = torch.sigmoid(logits)
+    # Convert probabilities to binary predictions using a threshold (0.5 for sigmoid, or 0 for logits)
+    predicted_winners = (predicted_probs > 0.5) # Boolean tensor of predictions [B, P]
+
+
+    # Initialize metrics to zero
+    total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+
+
+    # Handle padding:
+    # If pad is provided, zero out loss and metrics for padded positions
+    if pad is not None:
+        # valid_masks are True for non-padded (valid) positions
+        # Your 'pad' is True for padding, so ~pad means non-padding
+        valid_masks = ~pad # [B, P]
+        
+        # Mask out loss for padded positions
+        masked_select_loss = select_loss * valid_masks.float()
+        
+        # Count the number of valid elements for averaging
+        num_valid_elements = valid_masks.sum().float()
+        
+        if num_valid_elements > 0:
+            total_obs_loss = masked_select_loss.sum() / num_valid_elements
+            
+            # Calculate correct predictions only for valid elements
+            correct_predictions = ((predicted_winners == true_winners) & valid_masks).sum().float()
+            accuracy = correct_predictions / num_valid_elements
+
+            # Calculate True Positives (TP) and Actual Positives (AP) for Recall
+            # TP: (predicted_winners is True AND true_winners is True AND is valid)
+            true_positives = ((predicted_winners == True) & (true_winners == True) & valid_masks).sum().float()
+            # AP: (true_winners is True AND is valid)
+            actual_positives = (true_winners & valid_masks).sum().float()
+
+            if actual_positives > 0:
+                recall = true_positives / actual_positives
+            else:
+                # If there are no actual positive labels in the valid masks, recall is 1.0 if TP is 0, else 0.0 (convention varies, 1.0 common if no positives to miss)
+                recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype) # Convention for no actual positives
+                if true_positives > 0: # This case should ideally not happen if actual_positives is 0
+                    recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+        else:
+            # If the entire batch is padded, loss, accuracy, and recall are 0.0
+            total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype) # If no valid elements, can't calculate recall meaningfully, setting to 0.0 or NaN
+
+    else:
+        # If no pad is provided, calculate loss and metrics for all elements
+        total_obs_loss = select_loss.mean()
+        
+        correct_predictions = (predicted_winners == true_winners).sum().float()
+        accuracy = correct_predictions / true_winners.numel() # Use .numel() for total elements when no padding
+
+        true_positives = ((predicted_winners == True) & (true_winners == True)).sum().float()
+        actual_positives = true_winners.sum().float()
+        
+        if actual_positives > 0:
+            recall = true_positives / actual_positives
+        else:
+            recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
+            if true_positives > 0:
+                recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+
+
+    results = {
+        "obs_loss": total_obs_loss,
+        "accuracy": accuracy,
+        "recall": recall,
+    }
+    return results
+
+
+def obs_train(
+    model: nn.Module,
+    optimizer: Adam,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int,
+    print_log_freq: int = 10,
+    wandb_log_freq: int = 10,
+    image_log_freq: int = 1000,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    use_tqdm: bool = True,
+):
+    """
+    Train the model for one epoch.
+
+    Args:
+        model: model to train
+        optimizer: optimizer to use
+        dataloader: dataloader for training
+        transform: transform to use
+        device: device to use
+        run_folder: folder to save images to
+        epoch: current epoch
+        print_log_freq: how often to print loss
+        image_log_freq: how often to log images
+        num_images_log: number of images to log
+        use_wandb: whether to use wandb
+        use_tqdm: whether to use tqdm
+    """
+    model = model.to(device)
+    model.train()
+    scaler = GradScaler()
+
+    obs_loss_logger = Logger("obs_loss", "train", window_size=print_log_freq)
+    accuracy_logger = Logger("accuracy", "train", window_size=print_log_freq)
+    recall_logger = Logger("recall", "train", window_size=print_log_freq)
+    
+    loggers = {
+        "obs_loss": obs_loss_logger,
+        "accuracy": accuracy_logger,
+        "recall": recall_logger,
+    }
+
+    num_batches = len(dataloader)
+    tqdm_iter = tqdm.tqdm(
+        dataloader,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Training epoch {epoch}",
+    )
+    for i, data in enumerate(tqdm_iter):
+        (
+            obs_image, # [batch_size, 3 * (context_size+1), H, W]
+            _, # [batch_size, context_size+1, H, W]
+            candidates_masks, # [batch_size, num_persons, context_size+1, H, W]
+            chosen, # [batch_size, num_persons]
+            _,
+            pad, # [batch_size, num_persons]
+        ) = data
+
+        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
+
+        obs_images = torch.split(obs_image, 3, dim=1)  # [batch_size, 3, H, W] * (context_size+1)
+        obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
+        obs_image = torch.cat(obs_images, dim=1)  # [batch_size, 3 * (context_size+1), H, W]
+
+        # Convert person_masks to person_attention by taking union along num_persons dimension
+        candidates_masks = candidates_masks.to(device)
+        chosen = chosen.to(device)
+        pad = pad.to(device)
+        # Create selection mask using select_labels and invalid flag
+        valid_masks = ~pad  # [B, P]
+        true_winners = (chosen == 1) & valid_masks  # [B, P]
+
+        optimizer.zero_grad()
+
+        with autocast():
+            logits = model(obs_image, candidates_masks, pad)  # [B, P]
+            
+            losses = compute_obsloss(
+            true_winners=true_winners, logits=logits, pad=pad)
+            loss = losses["obs_loss"]
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        for key, value in losses.items():
+            if key in loggers:
+                logger = loggers[key]
+                logger.log_data(value.item())
+
+        probabilities = torch.sigmoid(logits)  # [B, P]
+
+        viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
+
+        obsp_log(
+            i=i,
+            epoch=epoch,
+            num_batches=num_batches,
+            run_folder=run_folder,
+            num_images_log=int(num_images_log/3),
+            loggers=loggers,
+            obs_images=viz_obs_images,
+            winner_masks=viz_winner_masks,
+            obs_pred=probabilities,
+            obs_label=chosen,
+            use_wandb=use_wandb,
+            mode="train",
+            use_latest=True,
+            wandb_log_freq=wandb_log_freq,
+            print_log_freq=print_log_freq,
+            image_log_freq=image_log_freq,
+        )
+
+
+def obs_evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    transform: transforms,
+    device: torch.device,
+    run_folder: str,
+    epoch: int = 0,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    eval_fraction: float = 1.0,
+    use_tqdm: bool = True,
+):
+    """
+    Evaluate the model on the given evaluation dataset.
+    """
+
+    # 设置模型为评估模式
+    model = model.to(device)
+    model.eval()
+
+    # 初始化日志器
+    loggers = {
+        "obs_loss": Logger("obs_loss", "test"),
+        "accuracy": Logger("accuracy", "test"),
+        "recall": Logger("recall", "test"),
+    }
+
+    num_batches = max(int(len(dataloader) * eval_fraction), 1)
+
+    tqdm_iter = tqdm.tqdm(
+        itertools.islice(dataloader, num_batches),
+        total=num_batches,
+        disable=not use_tqdm,
+        dynamic_ncols=True,
+        desc=f"Evaluating for epoch {epoch}",
+    )
+    
+    with torch.no_grad():
+        for i, data in enumerate(tqdm_iter):
+            obs_image, _, candidates_masks, chosen, _, pad= data
+    
+            viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
+
+            obs_images = torch.split(obs_image, 3, dim=1)
+            obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
+            obs_image = torch.cat(obs_images, dim=1)
+
+            # Convert person_masks to person_attention by taking union along num_persons dimension
+            candidates_masks = candidates_masks.to(device)
+            chosen = chosen.to(device)
+            pad = pad.to(device)
+            # Create selection mask using select_labels and invalid flag
+            valid_masks = ~pad  # [B, P]
+            true_winners = (chosen ==1) & valid_masks  #[B. P]
+
+            # 前向推理
+            logits = model(obs_image, candidates_masks, pad)  # [B, P]
+
+            losses = compute_obsloss(true_winners=true_winners, logits=logits, pad=pad)
+            for key, value in losses.items():
+                if key in loggers:
+                    loggers[key].log_data(value.item())
+
+            probabilities = torch.sigmoid(logits)  # [B, P]
+
+            viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
+
+            # 只对最后一个batch进行可视化
+            if i == num_batches - 1: 
+                obsp_log(
+                    i=0,
+                    epoch=epoch,
+                    num_batches=num_batches,
+                    run_folder=run_folder,
+                    num_images_log=num_images_log,
+                    loggers=loggers,
+                    obs_images=viz_obs_images,
+                    winner_masks=viz_winner_masks,
+                    obs_pred=probabilities,
+                    obs_label=chosen,
+                    use_wandb=use_wandb,
+                    mode="test",
+                    use_latest=False,
+                    wandb_log_freq=1,
+                    print_log_freq=1,
+                    image_log_freq=1,
+                    wandb_increment_step=False,
+                )
+
+    # 返回主要评估指标
+    return loggers["obs_loss"].average()
 
 ###################################################################################################
 
@@ -2203,7 +2568,7 @@ def sel_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
-        log_data(
+        action_log(
             i=i,
             epoch=epoch,
             num_batches=num_batches,
@@ -2295,7 +2660,7 @@ def sel_evaluate(
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
-                log_data(
+                action_log(
                     i=0,
                     epoch=epoch,
                     num_batches=num_batches,
