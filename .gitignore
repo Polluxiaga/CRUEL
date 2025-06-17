@@ -1,8 +1,8 @@
 my_logs/*
 wandb/*
 manual_gaze_csv/*
-ourdata/*
-ourdata_splits/*
+debugdata/*
+debugdata_splits/*
 data/*
 data_vis/*
 data_splits/*

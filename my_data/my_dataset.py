@@ -6,6 +6,7 @@ from typing import Tuple
 import tqdm
 import io
 import lmdb
+from typing import Optional, Tuple, List
 
 import torch
 from torch.utils.data import Dataset
@@ -29,6 +30,8 @@ class gaze_dataset(Dataset):
         len_traj_pred: int,
         context_size: int,
         obs_type: str = "image",
+        use_generated_labels: bool = False,
+        generated_labels_path: Optional[str]=None,
     ):
         """
         Main ViNT dataset class
@@ -43,6 +46,7 @@ class gaze_dataset(Dataset):
             normalize (bool): Whether to normalize the distances or actions
             obs_type (str): What data type to use for the observation
         """
+        super().__init__()
         self.data_folder = data_folder
         self.data_split_folder = data_split_folder
         self.dataset_name = dataset_name
@@ -60,11 +64,15 @@ class gaze_dataset(Dataset):
         self.context_size = context_size
         self.obs_type = obs_type
 
+        self.use_generated_labels = use_generated_labels
+        self._cached_generated_labels = None # 初始时设置为 None
 
         self.trajectory_cache = {}
         self.fixations_cache = {}
         self.person_ids_cache = {}
         self.select_ids_cache = {}
+        self.generated_labels_cache = {}
+
         self._load_index()
         
         # Use cache path as unique key for tracking built status
@@ -85,6 +93,42 @@ class gaze_dataset(Dataset):
         
         # Always open the LMDB environment for both
         self._open_cache()
+
+        # 尝试从磁盘加载生成标签，如果 use_generated_labels 为 True 且提供了路径
+        if self.use_generated_labels and generated_labels_path and os.path.exists(generated_labels_path):
+            print(f"Loading generated labels from disk: {generated_labels_path}...")
+            try:
+                loaded_preds_list = torch.load(generated_labels_path)
+                if not isinstance(loaded_preds_list, list) or not all(isinstance(p, torch.Tensor) for p in loaded_preds_list):
+                     raise TypeError("Generated labels file should contain a list of tensors.")
+                
+                # 存储为列表，通过索引访问
+                self._cached_generated_labels = loaded_preds_list
+                print(f"Loaded {len(self._cached_generated_labels)} generated label samples from disk.")
+            except Exception as e:
+                print(f"Warning: Failed to load generated labels from {generated_labels_path}: {e}. Proceeding without them.")
+                self.use_generated_labels = False # 加载失败则禁用
+                self._cached_generated_labels = None
+        elif self.use_generated_labels and not generated_labels_path:
+             print("Warning: use_generated_labels is True but no generated_labels_path provided. Labels will need to be set dynamically via set_generated_labels().")
+
+
+    def set_generated_labels(self, labels_list: List[torch.Tensor]):
+        """
+        动态设置内存中的生成选择器标签。
+        此列表应包含未经填充的布尔张量，每个数据集样本一个，
+        按原始样本索引进行索引。
+        """
+        if not isinstance(labels_list, list):
+            raise TypeError("labels_list 必须是 torch.Tensor 列表。")
+        # 确保标签列表的长度与数据集的样本总数匹配
+        if len(labels_list) != len(self.samples_index):
+            raise ValueError(f"生成的标签长度 ({len(labels_list)}) 必须与数据集长度 ({len(self.samples_index)}) 匹配。")
+
+        self._cached_generated_labels = labels_list
+        self.use_generated_labels = True # 确保设置此标志
+        print(f"Dataset updated with {len(labels_list)} in-memory generated labels.")
+    
 
     def _open_cache(self):
         """Open the LMDB environment(s) in read-only mode"""
@@ -453,14 +497,15 @@ class gaze_dataset(Dataset):
         gaze_maps = torch.cat([self._load_fixations(traj_name, t) for t in context])
 
         # Load person IDs, labels and masks
-        person_ids, select_labels = self._load_persons(traj_name, curr_time)
+        person_ids, gt_winner_labels_list = self._load_persons(traj_name, curr_time)
+        gt_winner_labels_tensor = torch.tensor(gt_winner_labels_list, dtype=torch.bool)
         
         # Handle empty person case
         if len(person_ids) == 0:
             W, H = self.image_size
             # Create dummy tensors with correct dimensions
             person_masks = torch.zeros((1, self.context_size + 1, H, W), dtype=torch.bool)
-            select_labels = torch.zeros((1,), dtype=torch.bool)
+            winner_labels_to_return = torch.zeros((1,), dtype=torch.bool)
         else:
             # Load masks from LMDB cache
             person_masks_list = []
@@ -468,7 +513,26 @@ class gaze_dataset(Dataset):
                 seq = [self._load_person_mask(traj_name, t, tid) for t in context]
                 person_masks_list.append(torch.stack(seq, dim=0))  # (context_size+1, H, W)
             person_masks = torch.stack(person_masks_list, dim=0).bool()  # (num_persons, context_size+1, H, W)
-            select_labels = torch.tensor(select_labels, dtype=torch.bool) # (num_persons,)
+
+            # Determine which winner_labels to return: GT or generated
+            winner_labels_to_return = None
+            if self.use_generated_labels:
+                if self.use_generated_labels and self._cached_generated_labels is not None:
+                    # 获取缓存中存储的原始未填充预测标签 (P_actual,)
+                    generated_labels_from_cache = self._cached_generated_labels[i]
+                
+                    # 检查加载的预测标签长度是否与当前样本的实际人数匹配
+                    if generated_labels_from_cache.shape[0] != len(person_ids):
+                        print(f"Warning: Generated labels shape mismatch for index {i}. Expected {len(person_ids)}, got {generated_labels_from_cache.shape[0]}. Using dummy labels.")
+                        winner_labels_to_return = torch.zeros((len(person_ids),), dtype=torch.bool)
+                    else:
+                        winner_labels_to_return = generated_labels_from_cache
+                else:
+                    print(f"Error: Generated labels for index {i} not found in cache. Returning dummy labels.")
+                    winner_labels_to_return = torch.zeros((len(person_ids),), dtype=torch.bool)
+            else:
+                # 使用 GT 标签
+                winner_labels_to_return = gt_winner_labels_tensor
 
         # Load trajectory data
         curr_traj_data = self._get_trajectory(traj_name)
@@ -483,6 +547,7 @@ class gaze_dataset(Dataset):
             torch.as_tensor(obs_images, dtype=torch.float32),
             torch.as_tensor(gaze_maps, dtype=torch.float32),
             torch.as_tensor(person_masks, dtype=torch.bool),
-            torch.as_tensor(select_labels, dtype=torch.bool),
-            torch.as_tensor(actions, dtype=torch.float32)
+            torch.as_tensor(winner_labels_to_return, dtype=torch.bool),
+            torch.as_tensor(actions, dtype=torch.float32),
+            i                          # Original dataset index (供 collate_fn 或 generate_selector_predictions 使用)
         )

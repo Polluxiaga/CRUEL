@@ -105,9 +105,9 @@ class WinnerSelector(nn.Module):
         rgb_feats = rgb_feats.flatten(2).transpose(1, 2)  # (B*N, spatial_flatten_len, D) -> (B*N, 20, D)
         rgb_feats = rgb_feats.reshape(B, self.N * self.spatial_flatten_len, self.D)  # (B, N*20, D)
         
-        rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats)
-        rgb_out = self.rgb_context_transformer(rgb_feats_pe)
-        rgb_context_summary = rgb_out.mean(dim=1)
+        rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats)  # (B, N*20, D)
+        rgb_out = self.rgb_context_transformer(rgb_feats_pe)  # (B, N*20, D)
+        rgb_context_summary = rgb_out.mean(dim=1)  # (B, D)
 
         # Mask 路径
         flat_mask = mask_imgs.view(B * P * self.N, 1, mask_imgs.shape[3], mask_imgs.shape[4]).float()
@@ -120,14 +120,14 @@ class WinnerSelector(nn.Module):
         # 重塑，现在可以直接用统一的 spatial_flatten_len
         mask_feats = mask_feats.reshape(B * P, self.N * self.spatial_flatten_len, self.D)  # (B*P, N*20, D)
         
-        mask_feats_pe = self.pos_encoder_n_frames(mask_feats)
-        mask_out = self.mask_sequence_transformer(mask_feats_pe)
-        person_mask_summary = mask_out.mean(dim=1).view(B, P, self.D)
+        mask_feats_pe = self.pos_encoder_n_frames(mask_feats)  # (B, N*20, D)
+        mask_out = self.mask_sequence_transformer(mask_feats_pe)  # (B, N*20, D)
+        person_mask_summary = mask_out.mean(dim=1).view(B, P, self.D)  # (B, P, D)
 
         # 融合与预测
-        rgb_context_expanded = rgb_context_summary.unsqueeze(1).expand(-1, P, -1)
-        fused = torch.cat([rgb_context_expanded, person_mask_summary], dim=-1)
-        logits = self.fusion_predictor(fused.reshape(B * P, -1)).view(B, P)
+        rgb_context_expanded = rgb_context_summary.unsqueeze(1).expand(-1, P, -1)  # (B, P, D)
+        fused = torch.cat([rgb_context_expanded, person_mask_summary], dim=-1)  # (B, P, 2D)
+        logits = self.fusion_predictor(fused.reshape(B * P, -1)).view(B, P)  # (B, P)
         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
 
         return logits

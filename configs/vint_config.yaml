@@ -4,15 +4,17 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-gpu_id: 0
-method: "persontoken" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or obs or sel
+gpu_id: 3
+method: "phase" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or obs or phase
 use_wandb: True # set to false if you don't want to log to wandb
 wandb_log_freq: 110 # in iterations
 train: True
-batch_size: 64
+batch_size: 128
+batch_size_obs_model: 16  # For WinnerSelector
+batch_size_act_model: 4
 epochs: 200
 num_workers: 8
-lr: 1e-4
+lr: 5e-4
 optimizer: adamw
 clipping: True
 max_norm: 1.
@@ -29,13 +31,13 @@ early_stopping: true  # 是否启用早停
 patience: 200         # 容忍多少个epoch测试损失没有改善
 min_delta: 0.0001    # 改善阈值
 
-# Stage training parameters (only used when method is "sel")
-stage1_epochs: 50
-stage2_epochs: 30
-stage3_epochs: 50
-stage1_loss_threshold: 0.1
-stage2_loss_threshold: 0.1
-stage3_loss_threshold: 0.1
+# Stage training parameters (only used when method is "phase")
+stage1_epochs: 1
+stage2_epochs: 200
+#stage3_epochs: 50
+stage1_loss_threshold: 0.01
+stage2_loss_threshold: 0.01
+stage3_loss_threshold: 0.01
 
 # model params
 model_type: vint
@@ -61,15 +63,17 @@ obs_type: "image"
 goal_type: "image"
 
 datasets:
-  debugdata:
+  data:
     data_folder: /home/yzc/CRUEL/debugdata
     train: /home/yzc/CRUEL/debugdata_splits/train/
     test: /home/yzc/CRUEL/debugdata_splits/test/
+    generated_labels_path: /home/yzc/CRUEL/debugdata_splits/
 
-  data:
+  ddata:
     data_folder: /home/yzc/CRUEL/data
     train: /home/yzc/CRUEL/data_splits/train/ #data_splits_folder
     test: /home/yzc/CRUEL/data_splits/test/ #data_splits_folder
+    generated_labels_path: /home/yzc/CRUEL/data_splits/ #save generated_labels
     # data_folder: /Users/pollux/Documents/Robot_Navigation/CRUEL/data
     # train: /Users/pollux/Documents/Robot_Navigation/CRUEL/data_splits/train/ #data_splits_folder
     # test: /Users/pollux/Documents/Robot_Navigation/CRUEL/data_splits/test/ #data_splits_folder

@@ -325,19 +325,19 @@ def plot_confusion_bar(pred_select:np.array, label_select:np.array, ax:plt.Axes)
         pred_val = pred_select[i]
         label_val = label_select[i]
 
-        if pred_val > 0.5 and label_val == 1:
+        if pred_val > 0.4 and label_val == 1:
             # True Positive (Model selected, Actual selected)
             confusion_colors[0, i] = [0.2, 0.8, 0.2]  # Green
             bar_labels.append(f'{pred_val:.2f}\n(TP)')
-        elif pred_val > 0.5 and label_val == 0:
+        elif pred_val > 0.4 and label_val == 0:
             # False Positive (Model selected, Actual not selected)
             confusion_colors[0, i] = [0.2, 0.2, 0.8]  # Blue
             bar_labels.append(f'{pred_val:.2f}\n(FP)')
-        elif pred_val <= 0.5 and label_val == 1:
+        elif pred_val <= 0.4 and label_val == 1:
             # False Negative (Model not selected, Actual selected)
             confusion_colors[0, i] = [0.8, 0.2, 0.2]  # Red
             bar_labels.append(f'{pred_val:.2f}\n(FN)')
-        else:  # pred_val <= 0.5 and label_val == 0
+        else:  # pred_val <= 0.4 and label_val == 0
             # True Negative (Model not selected, Actual not selected)
             confusion_colors[0, i] = [0.7, 0.7, 0.7]  # Gray
             bar_labels.append(f'{pred_val:.2f}\n(TN)')

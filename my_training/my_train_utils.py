@@ -1,7 +1,9 @@
 import wandb
 import numpy as np
+import math
 import tqdm
 import itertools
+from sklearn.metrics import precision_recall_curve, auc
 
 import torch
 import torch.nn as nn
@@ -46,7 +48,7 @@ def person_collate_fn(batch):
     """
 
     # 1) 解包
-    obs_images, _, mask_list, select_list, action_list = zip(*batch)
+    obs_images, _, mask_list, select_list, action_list, original_idx_list = zip(*batch)
     B = len(batch)
 
     # 2) Stack obs_images and action_labels
@@ -78,7 +80,7 @@ def person_collate_fn(batch):
     select_batch = torch.stack(select_padded, dim=0)  # [B, P_max]
     invalid_flag = torch.stack(invalid, dim=0)     # [B, P_max]
 
-    return obs_batch, None, mask_batch, select_batch, action_batch, invalid_flag
+    return obs_batch, None, mask_batch, select_batch, action_batch, invalid_flag, torch.tensor(original_idx_list, dtype=torch.long)
 
 
 class Logger:
@@ -319,6 +321,7 @@ def base_train(
             _,
             _,
             action_label,
+            _,
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3]) # [batch_size, context_size+1, 3, H, W]
@@ -415,7 +418,7 @@ def base_evaluate(
 
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, _, _, action_label = data
+            obs_image, _, _, _, action_label, _ = data
 
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -570,6 +573,7 @@ def cnnaux_train(
             _,
             _,
             action_label,
+            _,
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3]) # [batch_size, context_size+1, 3, H, W]
@@ -674,7 +678,7 @@ def cnnaux_evaluate(
 
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_attention, _, _, action_label = data
+            obs_image, gaze_attention, _, _, action_label, _ = data
 
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -848,6 +852,7 @@ def gazeaux_train(
             _,
             _,
             action_label,
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
@@ -957,7 +962,7 @@ def gazeaux_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_attention, _, _, action_label = data
+            obs_image, gaze_attention, _, _, action_label, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1077,6 +1082,7 @@ def personaux_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
@@ -1204,7 +1210,7 @@ def personaux_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, person_masks, select_labels, action_label, invalid = data
+            obs_image, _, person_masks, select_labels, action_label, invalid, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1338,6 +1344,7 @@ def gazechannel_train(
             _, # [batch_size, num_persons, context_size+1, H, W]
             _, # [batch_size, num_persons]
             action_label,
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
@@ -1425,7 +1432,7 @@ def gazechannel_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_maps, _, _, action_label = data
+            obs_image, gaze_maps, _, _, action_label, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1532,6 +1539,7 @@ def personchannel_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
@@ -1629,7 +1637,7 @@ def personchannel_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, person_masks, select_labels, action_label, invalid = data
+            obs_image, _, person_masks, select_labels, action_label, invalid, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1745,6 +1753,7 @@ def gazetoken_train(
             _, # [batch_size, num_persons, context_size+1, H, W]
             _, # [batch_size, num_persons]
             action_label,
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
@@ -1832,7 +1841,7 @@ def gazetoken_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_maps, _, _, action_label = data
+            obs_image, gaze_maps, _, _, action_label, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1939,6 +1948,7 @@ def persontoken_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
@@ -2036,7 +2046,7 @@ def persontoken_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, person_masks, select_labels, action_label, invalid = data
+            obs_image, _, person_masks, select_labels, action_label, invalid, _ = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -2098,22 +2108,31 @@ def compute_obsloss(
     true_winners: torch.Tensor, # 这是一个布尔张量，形状为 [B, P]
     logits: torch.Tensor,     # 模型的输出，形状为 [B, P]，包含 -inf
     pad: torch.Tensor = None, # 从 obs_train 传入的 padding 掩码，形状为 [B, P]，True 表示 padding
+    pos_weight: float = 3, # 新增：正样本的权重，float 类型，直接传入 BCEWithLogitsLoss
+    prediction_threshold: float = 0.4, # 新增：用于二值分类的预测阈值
 ):
     """
     Compute losses and metrics for select prediction.
     Handles -inf logits for padded entries by masking the loss and metrics.
+    Includes pos_weight for BCEWithLogitsLoss and F1-score calculation.
     """
 
     assert logits.shape == true_winners.shape, f"Logits shape {logits.shape} != true_winners shape {true_winners.shape}"
     if pad is not None:
         assert logits.shape == pad.shape, f"Logits shape {logits.shape} != pad shape {pad.shape}"
 
-
     # Convert boolean labels to float for loss computation
     true_winner_float = true_winners.float()
 
-    # Initialize loss function with reduction='none' to get per-element loss
-    loss_fn = nn.BCEWithLogitsLoss(reduction='none')
+    # Prepare pos_weight for BCEWithLogitsLoss.
+    # If a float is provided, convert it to a tensor on the same device and dtype as true_winner_float.
+    # This is for robustness, though BCEWithLogitsLoss can often handle float directly.
+    _pos_weight_tensor = None
+    if pos_weight is not None:
+        _pos_weight_tensor = torch.tensor(pos_weight, device=true_winner_float.device, dtype=true_winner_float.dtype)
+
+    # Initialize loss function with optional pos_weight and reduction='none'
+    loss_fn = nn.BCEWithLogitsLoss(reduction='none', pos_weight=_pos_weight_tensor)
 
     # Calculate per-element loss
     # select_loss will have shape [B, P]
@@ -2121,21 +2140,20 @@ def compute_obsloss(
 
     # Convert logits to predicted probabilities using sigmoid
     predicted_probs = torch.sigmoid(logits)
-    # Convert probabilities to binary predictions using a threshold (0.5 for sigmoid, or 0 for logits)
-    predicted_winners = (predicted_probs > 0.5) # Boolean tensor of predictions [B, P]
+    # Convert probabilities to binary predictions using the configurable threshold
+    predicted_winners = (predicted_probs > prediction_threshold) # Boolean tensor of predictions [B, P]
 
 
     # Initialize metrics to zero
     total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype) 
+    f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)   
 
 
     # Handle padding:
-    # If pad is provided, zero out loss and metrics for padded positions
     if pad is not None:
-        # valid_masks are True for non-padded (valid) positions
-        # Your 'pad' is True for padding, so ~pad means non-padding
         valid_masks = ~pad # [B, P]
         
         # Mask out loss for padded positions
@@ -2151,47 +2169,69 @@ def compute_obsloss(
             correct_predictions = ((predicted_winners == true_winners) & valid_masks).sum().float()
             accuracy = correct_predictions / num_valid_elements
 
-            # Calculate True Positives (TP) and Actual Positives (AP) for Recall
-            # TP: (predicted_winners is True AND true_winners is True AND is valid)
+            # Calculate True Positives (TP), False Positives (FP), False Negatives (FN), Actual Positives (AP)
             true_positives = ((predicted_winners == True) & (true_winners == True) & valid_masks).sum().float()
-            # AP: (true_winners is True AND is valid)
-            actual_positives = (true_winners & valid_masks).sum().float()
+            false_positives = ((predicted_winners == True) & (true_winners == False) & valid_masks).sum().float()
+            actual_positives = (true_winners & valid_masks).sum().float() # Equivalent to TP + FN
 
+            # Calculate Precision
+            if (true_positives + false_positives) > 0:
+                precision = true_positives / (true_positives + false_positives)
+            # else: precision remains 0.0 if no positives predicted
+
+            # Calculate Recall
             if actual_positives > 0:
                 recall = true_positives / actual_positives
             else:
-                # If there are no actual positive labels in the valid masks, recall is 1.0 if TP is 0, else 0.0 (convention varies, 1.0 common if no positives to miss)
-                recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype) # Convention for no actual positives
-                if true_positives > 0: # This case should ideally not happen if actual_positives is 0
-                    recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+                recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype) # Convention for no actual positives (perfect recall if nothing to miss)
+                # If true_positives > 0 and actual_positives == 0, this implies a logical error or empty ground truth for positives.
+                # In such an extreme case, recall should typically be 0.0, but the if-else structure for actual_positives covers this.
+            # Calculate F1-Score
+            if (precision + recall) > 0:
+                f1_score = 2 * (precision * recall) / (precision + recall)
+
         else:
-            # If the entire batch is padded, loss, accuracy, and recall are 0.0
+            # If the entire batch is padded, all metrics are 0.0
             total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
             accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype) # If no valid elements, can't calculate recall meaningfully, setting to 0.0 or NaN
+            recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
 
     else:
         # If no pad is provided, calculate loss and metrics for all elements
         total_obs_loss = select_loss.mean()
         
         correct_predictions = (predicted_winners == true_winners).sum().float()
-        accuracy = correct_predictions / true_winners.numel() # Use .numel() for total elements when no padding
+        accuracy = correct_predictions / true_winners.numel()
 
         true_positives = ((predicted_winners == True) & (true_winners == True)).sum().float()
+        false_positives = ((predicted_winners == True) & (true_winners == False)).sum().float()
+        false_negatives = ((predicted_winners == False) & (true_winners == True)).sum().float()
         actual_positives = true_winners.sum().float()
-        
+
+        # Calculate Precision
+        if (true_positives + false_positives) > 0:
+            precision = true_positives / (true_positives + false_positives)
+
+        # Calculate Recall
         if actual_positives > 0:
             recall = true_positives / actual_positives
         else:
-            recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
-            if true_positives > 0:
-                recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            recall = torch.tensor(1.0, device=logits.device, dtype=logits.dtype) # Convention for no actual positives
+            # Similar logic as above for true_positives > 0 and actual_positives == 0.
+
+        # Calculate F1-Score
+        if (precision + recall) > 0:
+            f1_score = 2 * (precision * recall) / (precision + recall)
 
 
     results = {
         "obs_loss": total_obs_loss,
         "accuracy": accuracy,
         "recall": recall,
+        "precision": precision, 
+        "f1_score": f1_score,   
     }
     return results
 
@@ -2235,12 +2275,18 @@ def obs_train(
     obs_loss_logger = Logger("obs_loss", "train", window_size=print_log_freq)
     accuracy_logger = Logger("accuracy", "train", window_size=print_log_freq)
     recall_logger = Logger("recall", "train", window_size=print_log_freq)
+    f1_logger = Logger("f1_score", "train", window_size=print_log_freq)
     
     loggers = {
         "obs_loss": obs_loss_logger,
         "accuracy": accuracy_logger,
         "recall": recall_logger,
+        "f1_score":f1_logger,
     }
+
+    # Lists to accumulate true labels and predicted probabilities for AUC-PR
+    all_true_winners_epoch = []
+    all_predicted_probs_epoch = []
 
     num_batches = len(dataloader)
     tqdm_iter = tqdm.tqdm(
@@ -2257,6 +2303,7 @@ def obs_train(
             chosen, # [batch_size, num_persons]
             _,
             pad, # [batch_size, num_persons]
+            _
         ) = data
 
         viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])  # [batch_size, context_size+1, 3, H, W]
@@ -2291,6 +2338,14 @@ def obs_train(
                 logger = loggers[key]
                 logger.log_data(value.item())
 
+        # Accumulate data for AUC-PR
+        current_predicted_probs = torch.sigmoid(logits).detach().cpu().numpy()
+        current_true_winners = true_winners.detach().cpu().numpy()
+        current_valid_masks = valid_masks.detach().cpu().numpy()
+
+        all_predicted_probs_epoch.extend(current_predicted_probs[current_valid_masks])
+        all_true_winners_epoch.extend(current_true_winners[current_valid_masks])
+
         probabilities = torch.sigmoid(logits)  # [B, P]
 
         viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
@@ -2313,6 +2368,30 @@ def obs_train(
             print_log_freq=print_log_freq,
             image_log_freq=image_log_freq,
         )
+
+    # --- Calculate and Log AUC-PR at the end of the epoch ---
+    if len(all_true_winners_epoch) > 0 and (np.sum(all_true_winners_epoch) > 0 and np.sum(1 - np.array(all_true_winners_epoch)) > 0):
+        # Only calculate if there are both positive and negative samples
+        precisions, recalls, _ = precision_recall_curve(all_true_winners_epoch, all_predicted_probs_epoch)
+        auc_pr_epoch = auc(recalls, precisions)
+        
+        print(f"Epoch {epoch} Train AUC-PR: {auc_pr_epoch:.4f}")
+        if use_wandb:
+            wandb.log({"train_auc_pr": auc_pr_epoch})
+    elif len(all_true_winners_epoch) > 0:
+        # Handle cases where only one class is present after filtering by valid_masks
+        if np.sum(all_true_winners_epoch) == 0:
+            print(f"Epoch {epoch} Train AUC-PR: N/A (No positive samples in valid data)")
+            if use_wandb:
+                wandb.log({"train_auc_pr": 0.0}) # Conventionally 0 if no positives
+        else: # Only positives
+            print(f"Epoch {epoch} Train AUC-PR: N/A (No negative samples in valid data)")
+            if use_wandb:
+                wandb.log({"train_auc_pr": 1.0}) # Conventionally 1 if no negatives
+    else:
+        print(f"Epoch {epoch} Train AUC-PR: N/A (No valid samples for PR curve)")
+        if use_wandb:
+            wandb.log({"train_auc_pr": 0.0})
 
 
 def obs_evaluate(
@@ -2340,7 +2419,12 @@ def obs_evaluate(
         "obs_loss": Logger("obs_loss", "test"),
         "accuracy": Logger("accuracy", "test"),
         "recall": Logger("recall", "test"),
+        "f1_score": Logger("f1_score", "test")
     }
+
+    # Lists to accumulate true labels and predicted probabilities for AUC-PR
+    all_true_winners_eval = []
+    all_predicted_probs_eval = []
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -2354,7 +2438,7 @@ def obs_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, candidates_masks, chosen, _, pad= data
+            obs_image, _, candidates_masks, chosen, _, pad, _= data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -2378,7 +2462,15 @@ def obs_evaluate(
                 if key in loggers:
                     loggers[key].log_data(value.item())
 
-            probabilities = torch.sigmoid(logits)  # [B, P]
+            # Accumulate data for AUC-PR
+            current_predicted_probs = torch.sigmoid(logits).cpu().numpy()
+            current_true_winners = true_winners.cpu().numpy()
+            current_valid_masks = valid_masks.cpu().numpy()
+
+            all_predicted_probs_eval.extend(current_predicted_probs[current_valid_masks])
+            all_true_winners_eval.extend(current_true_winners[current_valid_masks])
+
+            probabilities = torch.sigmoid(logits)
 
             viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
 
@@ -2404,281 +2496,28 @@ def obs_evaluate(
                     wandb_increment_step=False,
                 )
 
-    # 返回主要评估指标
-    return loggers["obs_loss"].average()
-
-###################################################################################################
-
-def compute_selloss(
-    select_label: torch.Tensor,
-    action_label: torch.Tensor,
-    select_pred: torch.Tensor,
-    action_pred: torch.Tensor,
-):
-    """
-    Compute losses for action prediction.
-
-    """
-    def action_reduce(unreduced_loss: torch.Tensor):
-        # Reduce over non-batch dimensions to get loss per batch element
-        while unreduced_loss.dim() > 1:
-            unreduced_loss = unreduced_loss.mean(dim=-1)
-        return (unreduced_loss).mean()
-
-    assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
-    action_loss = action_reduce(F.mse_loss(action_pred, action_label, reduction="none"))
-
-    action_waypts_cos_similarity = action_reduce(F.cosine_similarity(
-        action_pred, action_label, dim=-1
-    ))
-    
-    # Selection loss
-    log_probs = F.log_softmax(select_pred, dim=1)  # shape: (B, P_max)
-    select_loss = F.nll_loss(log_probs, select_label, reduction="mean")  # select_label: (B,)
-
-    # Combine losses with weight
-    alpha = 0.5
-    total_loss = (1 - alpha) * action_loss + alpha * select_loss
-
-    results = {
-        "action_loss": action_loss,
-        "select_loss": select_loss,
-        "total_loss": total_loss,
-        "action_waypts_cos_sim": action_waypts_cos_similarity,
-    }
-    return results
-
-
-def sel_train(
-    model: nn.Module,
-    optimizer: Adam,
-    dataloader: DataLoader,
-    transform: transforms,
-    device: torch.device,
-    run_folder: str,
-    epoch: int,
-    training_stage: dict = None,  # 新增参数
-    print_log_freq: int = 10,
-    wandb_log_freq: int = 10,
-    image_log_freq: int = 1000,
-    num_images_log: int = 8,
-    use_wandb: bool = True,
-    use_tqdm: bool = True,
-):
-    """
-    Train the model for one epoch.
-    
-    Args:
-        training_stage: Dict containing stage configuration:
-            {
-                "stage": 1/2/3,  # Current training stage
-                "use_gt_masks": bool,  # Whether to use ground truth masks
-                "freeze_selector": bool,  # Whether to freeze selector
-                "freeze_transformer": bool  # Whether to freeze transformer
-            }
-    """
-    model = model.to(device)
-    model.train()
-    
-    # Handle training stages if provided
-    if training_stage is not None:
-        # Stage 1: Train transformer with GT masks
-        if training_stage["freeze_selector"]:
-            for param in model.selector.parameters():
-                param.requires_grad = False
-        # Stage 2: Train selector
-        if training_stage["freeze_transformer"]:
-            for param in model.transformer.parameters():
-                param.requires_grad = False
-    
-    action_loss_logger = Logger("action_loss", "train", window_size=print_log_freq)
-    select_loss_logger = Logger("select_loss", "train", window_size=print_log_freq)
-    total_loss_logger = Logger("total_loss", "train", window_size=print_log_freq)
-    action_waypts_cos_sim_logger = Logger("action_waypts_cos_sim", "train", window_size=print_log_freq)
-    
-    loggers = {
-        "action_loss": action_loss_logger,
-        "select_loss": select_loss_logger,
-        "total_loss": total_loss_logger,
-        "action_waypts_cos_sim": action_waypts_cos_sim_logger,
-    }
-
-    num_batches = len(dataloader)
-    tqdm_iter = tqdm.tqdm(
-        dataloader,
-        disable=not use_tqdm,
-        dynamic_ncols=True,
-        desc=f"Training epoch {epoch}",
-    )
-    for i, data in enumerate(tqdm_iter):
-        (
-            obs_image, # [batch_size, 3 * (context_size+1), H, W]
-            _, # [batch_size, (context_size+1) * H/32 * W/32] 
-            person_mask, # [batch_size, num_persons, context_size+1, H, W]
-            select_label, # [batch_size, num_persons]
-            action_label, # [batch_size, len_traj_pred, 2]
-            invalid, # [batch_size, num_persons]
-        ) = data
-
-        viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3]) # [batch_size, context_size+1, 3, H, W]
-
-        obs_images = torch.split(obs_image, 3, dim=1)
-        obs_images = [transform(obs_image).to(device) for obs_image in obs_images]
-        obs_image = torch.cat(obs_images, dim=1)
-
-        person_masks = person_mask.to(device).bool()
-
-        select_label = select_label.to(device)
-        action_label = action_label.to(device)
-        invalid = invalid.to(device)
-
-        optimizer.zero_grad()
-      
-        if training_stage is not None and training_stage["use_gt_masks"]:
-            select_pred, action_pred, attention_scores = model(
-                obs_image, person_masks, invalid)
-        else:
-            # Get masks from selector if not using GT masks
-            with torch.no_grad():
-                select_logits = model.selector(obs_image)
-                pred_masks = model.get_masks_from_logits(select_logits)
-            select_pred, action_pred, attention_scores = model(
-                obs_image, pred_masks, invalid)
-
-        losses = compute_selloss(select_label=select_label, action_label=action_label, select_pred=select_pred, action_pred=action_pred)
-
-        losses["total_loss"].backward()
-
-        """ # 取回obs_features的梯度
-        obs_features_grad = model._grad_obs_features
-
-        if obs_features_grad is not None:
-            obs_features_grad = obs_features_grad.contiguous().view(
-            model.context_size + 1,
-            -1,
-            obs_features.shape[2],
-            obs_features.shape[3],
-            obs_features.shape[4]
-        ) """
-
-        optimizer.step()
-
-        for key, value in losses.items():
-            if key in loggers:
-                logger = loggers[key]
-                logger.log_data(value.item())
-
-        action_log(
-            i=i,
-            epoch=epoch,
-            num_batches=num_batches,
-            run_folder=run_folder,
-            num_images_log=int(num_images_log/3),
-            loggers=loggers,
-            obs_images=viz_obs_images,
-            action_pred=action_pred,
-            attention_scores=attention_scores,
-            action_label=action_label,
-            use_wandb=use_wandb,
-            mode="train",
-            use_latest=True,
-            wandb_log_freq=wandb_log_freq,
-            print_log_freq=print_log_freq,
-            image_log_freq=image_log_freq,
-        )
-
-
-def sel_evaluate(
-    model: nn.Module,
-    dataloader: DataLoader,
-    transform: transforms,
-    device: torch.device,
-    run_folder: str,
-    epoch: int = 0,
-    num_images_log: int = 8,
-    use_wandb: bool = True,
-    eval_fraction: float = 1.0,
-    use_tqdm: bool = True,
-):
-    """
-    Evaluate the model on the given evaluation dataset.
-    """
-
-    # 设置模型为评估模式
-    model = model.to(device)
-    model.eval()
-
-    # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "select_loss": Logger("select_loss", "test"),
-        "total_loss": Logger("total_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-    }
-
-    num_batches = max(int(len(dataloader) * eval_fraction), 1)
-
-    tqdm_iter = tqdm.tqdm(
-        itertools.islice(dataloader, num_batches),
-        total=num_batches,
-        disable=not use_tqdm,
-        dynamic_ncols=True,
-        desc=f"Evaluating for epoch {epoch}",
-    )
-    
-    with torch.no_grad():
-        for i, data in enumerate(tqdm_iter):
-            (
-                obs_image, # [batch_size, 3 * (context_size+1), H, W]
-                _, # [batch_size, (context_size+1) * H/32 * W/32] 
-                person_mask, # [batch_size, num_persons, context_size+1, H, W]
-                select_label, # [batch_size, num_persons]
-                action_label, # [batch_size, len_traj_pred, 2]
-                invalid, # [batch_size, num_persons]
-            ) = data
-    
-            viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
-
-            obs_images = torch.split(obs_image, 3, dim=1)
-            obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
-            obs_image = torch.cat(obs_images, dim=1)
-
-            person_masks = person_mask.to(device).bool()
-
-            select_label = select_label.to(device)
-            action_label = action_label.to(device)
-            invalid = invalid.to(device)
-
-            # 前向推理
-            select_pred, action_pred, attention_scores = model(obs_image,person_masks, invalid)
-
-            # 计算损失并记录（注意：此处直接用 .item() 记录数值）
-            losses = compute_selloss(select_label=select_label, action_label=action_label,select_pred=select_pred, action_pred=action_pred)
-            for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
-
-            # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
-                action_log(
-                    i=0,
-                    epoch=epoch,
-                    num_batches=num_batches,
-                    run_folder=run_folder,
-                    num_images_log=num_images_log,
-                    loggers=loggers,
-                    obs_images=viz_obs_images,
-                    action_pred=action_pred,
-                    attention_scores=attention_scores,
-                    action_label=action_label,
-                    use_wandb=use_wandb,
-                    mode="test",
-                    use_latest=False,
-                    wandb_log_freq=1,
-                    print_log_freq=1,
-                    image_log_freq=1,
-                    wandb_increment_step=False,
-                )
-
-    # 返回主要评估指标
-    return loggers["action_loss"].average()
+    # --- Calculate and Log AUC-PR at the end of evaluation ---
+    if len(all_true_winners_eval) > 0 and (np.sum(all_true_winners_eval) > 0 and np.sum(1 - np.array(all_true_winners_eval)) > 0):
+        precisions, recalls, _ = precision_recall_curve(all_true_winners_eval, all_predicted_probs_eval)
+        auc_pr_eval = auc(recalls, precisions)
+        
+        print(f"Epoch {epoch} Test AUC-PR: {auc_pr_eval:.4f}")
+        if use_wandb:
+            wandb.log({"test_auc_pr": auc_pr_eval})
+        return auc_pr_eval # Return AUC-PR as a primary metric
+    elif len(all_true_winners_eval) > 0:
+        if np.sum(all_true_winners_eval) == 0:
+            print(f"Epoch {epoch} Test AUC-PR: N/A (No positive samples in valid data)")
+            if use_wandb:
+                wandb.log({"test_auc_pr": 0.0})
+            return 0.0
+        else: # Only positives
+            print(f"Epoch {epoch} Test AUC-PR: N/A (No negative samples in valid data)")
+            if use_wandb:
+                wandb.log({"test_auc_pr": 1.0})
+            return 1.0
+    else:
+        print(f"Epoch {epoch} Test AUC-PR: N/A (No valid samples for PR curve)")
+        if use_wandb:
+            wandb.log({"test_auc_pr": 0.0})
+        return 0.0
