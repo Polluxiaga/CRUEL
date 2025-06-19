@@ -12,6 +12,7 @@ from my_training.my_train_utils import (
     personchannel_train, personchannel_evaluate,
     gazetoken_train, gazetoken_evaluate,
     persontoken_train, persontoken_evaluate,
+    dumobs_train, dumobs_evaluate,
     obs_train, obs_evaluate
 )
 import torch
@@ -82,7 +83,7 @@ def train_eval_loop(
     """
 
     # Determine which model is the primary target for *this specific* train_eval_loop call
-    if train_method == "obs":
+    if train_method == "obs" or train_method == "dumobs":
         primary_model = obs_model
         # Use a specific path for obs_model best checkpoint
         best_model_path = os.path.join(run_folder, "best_obs_model.pth")
@@ -225,6 +226,21 @@ def train_eval_loop(
                     num_images_log=num_images_log,
                     use_wandb=use_wandb,
                 )
+            elif train_method == "dumobs":
+                dumobs_train(
+                    model=obs_model,
+                    optimizer=optimizer,
+                    dataloader=train_loader,
+                    transform=transform,
+                    device=device,
+                    run_folder=run_folder,
+                    epoch=epoch,
+                    print_log_freq=print_log_freq,
+                    wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
+                    num_images_log=num_images_log,
+                    use_wandb=use_wandb,
+                )
             elif train_method == "obs":
                 obs_train(
                     model=obs_model,
@@ -330,6 +346,18 @@ def train_eval_loop(
         elif train_method == "persontoken":
             test_loss = persontoken_evaluate(
                 model=act_model,
+                dataloader=test_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+                eval_fraction=eval_fraction,
+            )
+        elif train_method == "dumobs":
+            test_loss = dumobs_evaluate(
+                model=obs_model,
                 dataloader=test_loader,
                 transform=transform,
                 device=device,

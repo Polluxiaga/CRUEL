@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from efficientnet_pytorch import EfficientNet
+from my_model.backbone import CustomTransformerEncoderLayer
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_seq_len: int = 50):
@@ -131,3 +132,144 @@ class WinnerSelector(nn.Module):
         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
 
         return logits
+    
+
+class WinnerSelectorPlus(nn.Module):
+    def __init__(
+        self,
+        context_size=5,
+        encoder_rgb_name='efficientnet-b0',
+        encoding_size=512,
+        ctx_mha_heads=8,
+        ctx_mha_layers=2,
+        ctx_ff_dim_factor=4,
+        mask_seq_mha_heads=8,
+        mask_seq_mha_layers=2,
+        mask_seq_ff_dim_factor=4,
+        fusion_hidden_dim_factor=1,
+        dropout_rate=0.1,
+    ):
+        super().__init__()
+
+        self.N = context_size + 1
+        self.D = encoding_size
+
+        # 定义RGB和Mask特征图的扁平化长度
+        # EfficientNet-B0对于128x160输入，特征图大小是4x5
+        self.spatial_flatten_len = 4 * 5 # 统一为 20
+
+        # PositionalEncoding 的最大序列长度
+        self.max_total_seq_len = self.N * self.spatial_flatten_len # N * 20
+
+
+        if self.D % ctx_mha_heads != 0:
+            raise ValueError("encoding_size must be divisible by ctx_mha_heads")
+        if self.D % mask_seq_mha_heads != 0:
+            raise ValueError("encoding_size must be divisible by mask_seq_mha_heads")
+
+        # RGB encoder
+        self.rgb_cnn_encoder = EfficientNet.from_name(encoder_rgb_name, include_top=False)
+        in_feats_rgb = 1280
+        self.compress_rgb = nn.Conv2d(in_feats_rgb, self.D, kernel_size=1)
+
+        # Mask encoder - 调整第三个 Conv2d 的 stride，使其输出 4x5
+        self.mask_cnn_encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1), nn.ReLU(inplace=True), # 128x160 -> 64x80
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(inplace=True), # 64x80 -> 32x40
+            nn.Conv2d(32, self.D, kernel_size=3, stride=8, padding=1), nn.ReLU(inplace=True), # 32x40 -> 4x5
+        )
+        # 注意：这里假设输入mask的 H,W 是 128, 160。如果不是，需要重新计算 stride/padding 来达到 4x5。
+
+        # 位置编码的最大序列长度
+        self.pos_encoder_n_frames = PositionalEncoding(self.D, max_seq_len=self.max_total_seq_len)
+
+        self.rgb_context_transformer_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(
+                d_model=self.D, nhead=ctx_mha_heads, dim_feedforward=self.D * ctx_ff_dim_factor,
+                dropout=dropout_rate, batch_first=True, norm_first=True
+            ) for _ in range(ctx_mha_layers)
+        ])
+
+        mask_seq_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.D, nhead=mask_seq_mha_heads, dim_feedforward=self.D * mask_seq_ff_dim_factor,
+            dropout=dropout_rate, batch_first=True, norm_first=True
+        )
+        self.mask_sequence_transformer = nn.TransformerEncoder(mask_seq_encoder_layer, num_layers=mask_seq_mha_layers)
+
+        self.fusion_predictor = nn.Sequential(
+            nn.LayerNorm(self.D * 2),
+            nn.Linear(self.D * 2, self.D * fusion_hidden_dim_factor), nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(self.D * fusion_hidden_dim_factor, 1)
+        )
+
+    def forward(self, rgb_imgs, mask_imgs, invalid):
+        B, _, H_rgb, W_rgb = rgb_imgs.shape
+        P = mask_imgs.shape[1]
+
+        # RGB path
+        flat_rgb = rgb_imgs.view(B * self.N, 3, H_rgb, W_rgb)
+        rgb_feats = self.rgb_cnn_encoder.extract_features(flat_rgb)  # (B*N, C, 4, 5)
+        rgb_feats = self.compress_rgb(rgb_feats)  # (B*N, D, 4, 5)
+
+        # Flatten spatial dimensions and reshape for Transformer
+        # (B*N, D, H_feat, W_feat) -> (B*N, D, H_feat*W_feat) -> (B*N, H_feat*W_feat, D)
+        rgb_feats_spatial = rgb_feats.flatten(2).transpose(1, 2)  
+        # Reshape to (B, N * spatial_flatten_len, D) for the transformer
+        rgb_feats_sequence = rgb_feats_spatial.reshape(B, self.N * self.spatial_flatten_len, self.D)
+        
+        rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats_sequence)  # (B, N*20, D)
+        
+        # Iterate through RGB Transformer layers and collect attention weights
+        rgb_attn_weights_list = []
+        rgb_out = rgb_feats_pe
+        for layer in self.rgb_context_transformer_layers:
+            # attn_weights from CustomTransformerEncoderLayer is (batch_size * num_heads, seq_len, seq_len)
+            # batch_size is B, and seq_len is N * spatial_flatten_len
+            rgb_out, attn_weights = layer(rgb_out) 
+            
+            # Reshape attn_weights to (B, num_heads, seq_len, seq_len) for easier averaging
+            # `attn_weights.shape[0]` here is `B * num_heads`
+            num_heads_current_layer = attn_weights.shape[0] // B
+            attn_weights_reshaped = attn_weights.view(B, num_heads_current_layer, attn_weights.shape[1], attn_weights.shape[2])
+            rgb_attn_weights_list.append(attn_weights_reshaped)
+
+        # Calculate average attention matrix across all layers and heads
+        if rgb_attn_weights_list:
+            stacked_attn_weights = torch.stack(rgb_attn_weights_list, dim=0)  # (ctx_mha_layers, B, num_heads, N*20, N*20)
+            # Average across layers (dim=0) and heads (dim=2)
+            avg_rgb_attention_matrix = torch.mean(stacked_attn_weights, dim=[0, 2])  # (B, N*20, N*20)
+        else:
+            print("No Transformer layers, return an empty/dummy tensor.")
+            avg_rgb_attention_matrix = torch.empty(
+                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len, 
+                device=rgb_imgs.device
+            )
+
+        # *** Extract RGB Token Attention Map ***
+        rgb_token_saliency = avg_rgb_attention_matrix.sum(dim=1) # (B, N * spatial_flatten_len)
+
+        # attention scores from act_model are also flattened to (B, N*spatial_flatten_len) and softmaxed.
+        normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1) # (B, N * spatial_flatten_len)
+        
+        rgb_context_summary = rgb_out.mean(dim=1)  # (B, D)
+
+        # Mask Path (no attention weights collected here as requested)
+        flat_mask = mask_imgs.view(B * P * self.N, 1, mask_imgs.shape[3], mask_imgs.shape[4]).float()
+        mask_feats = self.mask_cnn_encoder(flat_mask) 
+
+        mask_feats_spatial = mask_feats.flatten(2).transpose(1, 2)
+        mask_feats_reshaped = mask_feats_spatial.reshape(B * P, self.N * self.spatial_flatten_len, self.D)
+        
+        mask_feats_pe = self.pos_encoder_n_frames(mask_feats_reshaped)
+
+        mask_out = self.mask_sequence_transformer(mask_feats_pe)  # (B, N*20, D)
+        person_mask_summary = mask_out.mean(dim=1).view(B, P, self.D)  # (B, P, D)
+
+        # 融合与预测
+        rgb_context_expanded = rgb_context_summary.unsqueeze(1).expand(-1, P, -1)  # (B, P, D)
+        fused = torch.cat([rgb_context_expanded, person_mask_summary], dim=-1)  # (B, P, 2D)
+        logits = self.fusion_predictor(fused.reshape(B * P, -1)).view(B, P)  # (B, P)
+        logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
+
+        return logits, normalized_rgb_attention_sequence

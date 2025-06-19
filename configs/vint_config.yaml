@@ -5,13 +5,13 @@ run_name: vint
 
 # training setup
 gpu_id: 3
-method: "phase" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or obs or phase
+method: "phase" # base or cnnaux or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken or dumobs or obs or phase
 use_wandb: True # set to false if you don't want to log to wandb
 wandb_log_freq: 110 # in iterations
 train: True
 batch_size: 128
-batch_size_obs_model: 16  # For WinnerSelector
-batch_size_act_model: 4
+batch_size_obs_model: 48  # For WinnerSelector
+batch_size_act_model: 64
 epochs: 200
 num_workers: 8
 lr: 5e-4
@@ -32,12 +32,14 @@ patience: 200         # 容忍多少个epoch测试损失没有改善
 min_delta: 0.0001    # 改善阈值
 
 # Stage training parameters (only used when method is "phase")
-stage1_epochs: 1
-stage2_epochs: 200
+stage0_epochs: 100
+stage1_epochs: 50
+stage2_epochs: 100
 #stage3_epochs: 50
+stage0_loss_threshold: 0.01
 stage1_loss_threshold: 0.01
 stage2_loss_threshold: 0.01
-stage3_loss_threshold: 0.01
+#stage3_loss_threshold: 0.01
 
 # model params
 model_type: vint
@@ -63,13 +65,13 @@ obs_type: "image"
 goal_type: "image"
 
 datasets:
-  data:
+  debugdata:
     data_folder: /home/yzc/CRUEL/debugdata
     train: /home/yzc/CRUEL/debugdata_splits/train/
     test: /home/yzc/CRUEL/debugdata_splits/test/
     generated_labels_path: /home/yzc/CRUEL/debugdata_splits/
 
-  ddata:
+  data:
     data_folder: /home/yzc/CRUEL/data
     train: /home/yzc/CRUEL/data_splits/train/ #data_splits_folder
     test: /home/yzc/CRUEL/data_splits/test/ #data_splits_folder

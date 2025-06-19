@@ -8,7 +8,7 @@ import wandb
 import seaborn as sns
 import matplotlib.gridspec as gridspec
 
-VIZ_IMAGE_SIZE = (160, 128)
+VIZ_IMAGE_SIZE = (500, 400)
 FEATURE_SIZE = (4, 5)
 RED = np.array([1, 0, 0])
 GREEN = np.array([0, 1, 0])
@@ -152,7 +152,7 @@ def action_draw(
     - Row 1, Column 3: Bar chart of attention received by each token
     - Rows 2 & 3: 6 observation image attention map overlays
     """
-    fig = plt.figure(figsize=(12, 12)) # Revert to 3x3 figsize
+    fig = plt.figure(figsize=(24, 24)) # Revert to 3x3 figsize
     gs = gridspec.GridSpec(3, 3, figure=fig) # Revert to 3x3 GridSpec
 
     # Row 1, Column 1: Trajectory Prediction
@@ -452,7 +452,7 @@ def obsp_visualize(
     visualize_path = None
     if save_folder is not None:
         visualize_path = os.path.join(
-            save_folder, "visualize", mode, f"epoch{epoch}", "action_prediction"
+            save_folder, "visualize", mode, f"epoch{epoch}", "obs_prediction"
         )
 
     if not os.path.exists(visualize_path):

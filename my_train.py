@@ -1,5 +1,6 @@
 import os
 from typing import Optional, Dict, List
+import torch.nn.functional as F
 import argparse
 import tqdm
 import yaml
@@ -35,16 +36,115 @@ from torchvision import transforms
 import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
-from my_data.my_dataset import gaze_dataset
+from my_data.my_dataset import ObsDataset, ActDataset
 from my_model.backbone import base_model, channel_model, catoken_model
-from my_model.selectors import WinnerSelector
-from my_training.my_train_utils import person_collate_fn, base_collate_fn
+from my_model.selectors import WinnerSelector, WinnerSelectorPlus
+from my_training.my_train_utils import act_person_collate_fn, obs_person_collate_fn, act_base_collate_fn
 from my_training.my_train_eval_loop import train_eval_loop, load_model
+
+
+def generate_attnmap(
+    model: nn.Module,
+    dataloader: DataLoader, # This DataLoader MUST provide (obs_img, attention, ...) compatible with catoken_model
+    device: torch.device,
+) -> List[torch.Tensor]:
+    """
+    Generate the RGB attention maps from the act_model (catoken_model) for supervision.
+    The attention maps will be returned as a list of tensors, where each tensor corresponds
+    to an unpadded sample from the original dataset and has shape (N * spatial_flatten_len).
+    This represents the softmax-normalized attention distribution over only the RGB spatial tokens.
+
+    Returns:
+        A list of torch.Tensor, where each tensor is the (N * spatial_flatten_len)
+        attention map for a single sample, ordered by its original dataset index.
+    """
+    model.eval() # Set model to evaluation mode
+    
+    total_samples = len(dataloader.dataset)
+    # Initialize list to store attention maps in original dataset order
+    # Each element will be a tensor of shape (N * spatial_flatten_len)
+    all_unpadded_rgb_attention_maps = [None] * total_samples 
+    
+    # We need to determine H_feature * W_feature from the model's structure
+    # A safer way is to infer it or pass it. Let's infer during the first batch.
+    H_feature_val = None
+    W_feature_val = None
+    spatial_flatten_len_val = None
+
+    with torch.no_grad():
+        tqdm_iter = tqdm.tqdm(dataloader, desc="Generating act_model Attention Maps", dynamic_ncols=True)
+        for batch_data in tqdm_iter:
+            # Unpack the batched data, matching persontoken_train's data unpacking
+            (
+                obs_image,
+                _, # Unused from dataloader (e.g., gaze_map)
+                person_masks,
+                select_labels,
+                _, # Unused (e.g., action_label)
+                invalid,
+                original_indices_batch
+            ) = batch_data
+
+            # Move tensors to device
+            obs_image = obs_image.to(device)
+            person_masks = person_masks.to(device)
+            select_labels = select_labels.to(device)
+            invalid = invalid.to(device)
+            original_indices_list = original_indices_batch.cpu().tolist()
+
+            # --- Prepare person_attention input, exactly as in persontoken_train ---
+            valid_masks = ~invalid
+            select_mask = (select_labels == 1) & valid_masks
+            select_mask = select_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+
+            person_masks = person_masks * select_mask.float()
+            person_attention = (person_masks.sum(dim=1) > 0).float() 
+
+            # --- Infer spatial_flatten_len and N_frames_val if not already done ---
+            if spatial_flatten_len_val is None:
+                # Infer H_feature and W_feature using rgb_encoder's output for a single frame
+                sample_rgb_for_feature_size = obs_image[0:1, 0:3].to(device) # Just one frame (3 channels)
+                sample_features = model.rgb_encoder.extract_features(sample_rgb_for_feature_size)
+                H_feature_val = sample_features.shape[2]
+                W_feature_val = sample_features.shape[3]
+                spatial_flatten_len_val = H_feature_val * W_feature_val
+                
+                # Infer N (number of frames) from input image channels / 3
+                N_frames_val = obs_image.shape[1] // 3
+                if N_frames_val != (model.context_size + 1):
+                    print(f"Warning: Inferred N_frames ({N_frames_val}) does not match model's context_size+1 ({model.context_size+1}). Please ensure consistency.")
+
+            # Call the act_model
+            # attention_scores shape: (B, total_seq_len, total_seq_len)
+            # where total_seq_len = N * spatial_flatten_len (RGB) + N * spatial_flatten_len (Attention)
+            _, attention_scores_from_act_model = model(obs_image, person_attention)
+            
+            # --- Extract RGB-only Attention Map from the returned attention_scores ---
+            # The length of the RGB token sequence in the decoder's input
+            # The first half of the sequence for both queries and keys.
+            rgb_token_segment_length = N_frames_val * spatial_flatten_len_val
+            
+            attn_to_rgb_tokens = attention_scores_from_act_model[:, :, :rgb_token_segment_length]  # Shape: (B, total_seq_len, rgb_token_segment_length)
+
+            # Sum attention across the query dimension (dim=1) to get total attention received by each RGB key token.
+            rgb_token_saliency = attn_to_rgb_tokens.sum(dim=1)  # (B, N * spatial_flatten_len)
+
+            # Softmax normalize this sequence to get a probability distribution over the RGB tokens.
+            normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1)
+            
+            # Iterate through each sample in the current batch
+            for i_sample_in_batch in range(normalized_rgb_attention_sequence.shape[0]):
+                original_dataset_idx = original_indices_list[i_sample_in_batch]
+                
+                single_sample_attn_map = normalized_rgb_attention_sequence[i_sample_in_batch].cpu()
+                all_unpadded_rgb_attention_maps[original_dataset_idx] = single_sample_attn_map
+    
+    return all_unpadded_rgb_attention_maps
 
 
 def generate_selector_predictions(
     model: nn.Module,
-    dataloader: DataLoader, # This DataLoader MUST use person_collate_fn
+    dataloader: DataLoader, # This DataLoader MUST use obs_person_collate_fn
     device: torch.device,
 ) -> List[torch.Tensor]:
     """
@@ -60,16 +160,17 @@ def generate_selector_predictions(
     with torch.no_grad():
         tqdm_iter = tqdm.tqdm(dataloader, desc="Generating Selector Predictions", dynamic_ncols=True)
         for batch_data in tqdm_iter:
-            # Unpack the batched data from person_collate_fn
-            obs_batch, _, mask_batch, _, _, invalid_flag_batch, original_indices_batch = batch_data
+            # Unpack the batched data from obs_person_collate_fn
+            obs_batch, mask_batch, attnmap_batch, _, invalid_flag_batch, original_indices_batch = batch_data
             
             # Move tensors to device
             obs_batch = obs_batch.to(device)
             mask_batch = mask_batch.to(device)
+            attnmap_batch = attnmap_batch.to(device)
             invalid_flag_batch = invalid_flag_batch.to(device)
             original_indices_list = original_indices_batch.cpu().tolist() # Get original dataset indices
 
-            logits = model(obs_batch, mask_batch, invalid_flag_batch) # (B, P_max)
+            logits, _ = model(obs_batch, mask_batch, invalid_flag_batch) # (B, P_max)
             batched_preds_bool = (logits > 0).cpu().bool() # Convert logits to boolean predictions (B, P_max)
             
             # Iterate through each sample in the current batch
@@ -90,50 +191,61 @@ def generate_selector_predictions(
     return all_unpadded_predictions
 
 
-def create_model_and_optimizer(method_type, config, device, lr, model_type="act_model"):
+def create_model_and_optimizer(method_type, config, device, lr, model_type="act_model", model_instance=None):
     """Helper function to create a model and its optimizer/scheduler."""
-    model = None
-    if model_type == "obs_model":
-        model = WinnerSelector(
-            context_size=config["context_size"],
-        ).to(device)
-    elif model_type == "act_model":
-        if method_type == "gazechannel" or method_type == "personchannel":
-            model = channel_model(
-                method=method_type,
-                context_size=config["context_size"],
-                len_traj_pred=config["len_traj_pred"],
-                encoder=config["obs_encoder"],
-                encoding_size=config["encoding_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            ).to(device)
-        elif method_type == "gazetoken" or method_type == "persontoken" or method_type == "phase": # "phase" uses catoken_model in stage 2/3
-            model = catoken_model(
-                method=method_type, # Pass "persontoken" or "gazetoken" if that's the underlying
-                context_size=config["context_size"],
-                len_traj_pred=config["len_traj_pred"],
-                encoder=config["obs_encoder"],
-                encoding_size=config["encoding_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            ).to(device)
-        elif method_type == "base" or method_type == "cnnaux" or method_type == "gazeaux" or method_type == "personaux":
-             model = base_model(
-                method=method_type,
-                context_size=config["context_size"],
-                len_traj_pred=config["len_traj_pred"],
-                encoder=config["obs_encoder"],
-                encoding_size=config["encoding_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            ).to(device)
-        else:
-            raise ValueError(f"Unknown method type for act_model: {method_type}")
+    model = model_instance
+    if model is None:
+        if model_type == "obs_model":
+            if method_type == "dumobs":
+                model = WinnerSelector(
+                    context_size=config["context_size"],
+                ).to(device)
+            elif method_type == "obs":
+                model = WinnerSelectorPlus(
+                    context_size=config["context_size"],
+                ).to(device)
+        elif model_type == "act_model":
+            if method_type in ["gazechannel", "personchannel"]:
+                model = channel_model(
+                    method=method_type,
+                    context_size=config["context_size"],
+                    len_traj_pred=config["len_traj_pred"],
+                    encoder=config["obs_encoder"],
+                    encoding_size=config["encoding_size"],
+                    mha_num_attention_heads=config["mha_num_attention_heads"],
+                    mha_num_attention_layers=config["mha_num_attention_layers"],
+                    mha_ff_dim_factor=config["mha_ff_dim_factor"],
+                ).to(device)
+            elif method_type in ["gazetoken", "persontoken"]:
+                model = catoken_model(
+                    method=method_type,
+                    context_size=config["context_size"],
+                    len_traj_pred=config["len_traj_pred"],
+                    encoder=config["obs_encoder"],
+                    encoding_size=config["encoding_size"],
+                    mha_num_attention_heads=config["mha_num_attention_heads"],
+                    mha_num_attention_layers=config["mha_num_attention_layers"],
+                    mha_ff_dim_factor=config["mha_ff_dim_factor"],
+                ).to(device)
+            elif method_type in ["base", "cnnaux", "gazeaux", "personaux"]:
+                 model = base_model(
+                    method=method_type,
+                    context_size=config["context_size"],
+                    len_traj_pred=config["len_traj_pred"],
+                    encoder=config["obs_encoder"],
+                    encoding_size=config["encoding_size"],
+                    mha_num_attention_heads=config["mha_num_attention_heads"],
+                    mha_num_attention_layers=config["mha_num_attention_layers"],
+                    mha_ff_dim_factor=config["mha_ff_dim_factor"],
+                ).to(device)
+            else:
+                raise ValueError(f"Unknown method type for act_model: {method_type}")
+    
+    # 确保模型不为空，以便为其创建优化器和调度器
+    if model is None:
+        raise ValueError("Model instance is None and no new model was created. Cannot create optimizer.")
 
+    # 梯度裁剪
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
         for p in model.parameters():
@@ -145,6 +257,7 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
                 )
             )
 
+    # 优化器创建
     config["optimizer"] = config["optimizer"].lower()
     if config["optimizer"] == "adam":
         optimizer = Adam(model.parameters(), lr=lr, betas=(0.9, 0.98))
@@ -155,6 +268,7 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
     else:
         raise ValueError(f"Optimizer {config['optimizer']} not supported")
 
+    #调度器创建
     scheduler = None
     if config["scheduler"] is not None:
         config["scheduler"] = config["scheduler"].lower()
@@ -217,9 +331,9 @@ def main(config):
     # 1. For Stage 1 (obs_model training): use_generated_labels=False
     # 2. For Stage 2/3 (act_model training): use_generated_labels=True, with generated predictions
     
-    # Create datasets for obs_model training (Stage 1 of "phase", or if method is "obs")
+    # Create datasets for obs_model training (Stage 1 of "phase", or if method is "dumobs" or "obs")
     train_dataset_obs = ConcatDataset([
-        gaze_dataset(
+        ObsDataset(
             data_folder=config["datasets"]["data"]["data_folder"],
             data_split_folder=config["datasets"]["data"]["train"],
             dataset_name="data",
@@ -227,12 +341,12 @@ def main(config):
             len_traj_pred=config["len_traj_pred"],
             context_size=config["context_size"],
             obs_type=config["obs_type"],
-            use_generated_labels=False, # Selector training uses GT only
-            generated_labels_path=None,
+            use_generated_attnmaps=False, # Selector training uses GT only
+            generated_attnmaps_path=None,
         )
     ])
     test_dataset_obs = ConcatDataset([
-        gaze_dataset(
+        ObsDataset(
             data_folder=config["datasets"]["data"]["data_folder"],
             data_split_folder=config["datasets"]["data"]["test"],
             dataset_name="data",
@@ -240,8 +354,8 @@ def main(config):
             len_traj_pred=config["len_traj_pred"],
             context_size=config["context_size"],
             obs_type=config["obs_type"],
-            use_generated_labels=False, # Selector training uses GT only
-            generated_labels_path=None,
+            use_generated_attnmaps=False, # Selector training uses GT only
+            generated_attnmaps_path=None,
         )
     ])
 
@@ -254,7 +368,7 @@ def main(config):
         persistent_workers=True,
         pin_memory=True,
         prefetch_factor=2,
-        collate_fn=person_collate_fn # WinnerSelector needs person_collate_fn
+        collate_fn=obs_person_collate_fn # WinnerSelector needs obs_person_collate_fn
     )
     test_loader_obs = DataLoader(
         test_dataset_obs,
@@ -265,12 +379,13 @@ def main(config):
         persistent_workers=True,
         pin_memory=True,
         prefetch_factor=2,
-        collate_fn=person_collate_fn # WinnerSelector needs person_collate_fn
+        collate_fn=obs_person_collate_fn # WinnerSelector needs obs_person_collate_fn
     )
+
 
     # For other methods, or Stage 2/3 of "phase", we might need different collate_fns
     train_dataset_act = ConcatDataset([
-        gaze_dataset(
+        ActDataset(
             data_folder=config["datasets"]["data"]["data_folder"],
             data_split_folder=config["datasets"]["data"]["train"],
             dataset_name="data",
@@ -283,7 +398,7 @@ def main(config):
         )
     ])
     test_dataset_act = ConcatDataset([
-        gaze_dataset(
+        ActDataset(
             data_folder=config["datasets"]["data"]["data_folder"],
             data_split_folder=config["datasets"]["data"]["test"],
             dataset_name="data",
@@ -298,9 +413,9 @@ def main(config):
 
     # Determine the collate_fn for the action model based on its method type
     if config["method"] in ["personaux", "personchannel", "persontoken", "phase"]: # These use person_collate_fn
-        act_collate_fn = person_collate_fn
+        act_collate_fn = act_person_collate_fn
     else: # Default for base, cnnaux, gazeaux, gazechannel, gazetoken
-        act_collate_fn = base_collate_fn
+        act_collate_fn = act_base_collate_fn
 
     train_loader_act = DataLoader(
         train_dataset_act,
@@ -325,12 +440,13 @@ def main(config):
         collate_fn=act_collate_fn
     )
     
+
     # Initialize models
     if config["method"] == "phase":
-        obs_model, obs_optimizer, obs_scheduler = create_model_and_optimizer("obs", config, device, float(config["lr"]), model_type="obs_model")
         act_model, act_optimizer, act_scheduler = create_model_and_optimizer("persontoken", config, device, float(config["lr"]), model_type="act_model") # Phase Stage 2/3 uses persontoken
-    elif config["method"] == "obs":
-        obs_model, optimizer, scheduler = create_model_and_optimizer("obs", config, device, float(config["lr"]), model_type="obs_model")
+        obs_model = None
+    elif config["method"] == "dumobs" or config["method"] == "obs":
+        obs_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["lr"]), model_type="obs_model")
         act_model = None # Only obs_model is primary
     else: # All other single-stage methods train an action model
         act_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["lr"]), model_type="act_model")
@@ -371,13 +487,63 @@ def main(config):
                     act_scheduler.load_state_dict(act_checkpoint["scheduler_state_dict"])
                 # current_epoch = max(current_epoch, act_checkpoint.get("epoch", 0) + 1) # Keep track of max epoch to resume from
 
+
     # Stage training logic
     if config["method"] == "phase":
+        stage0_epochs = config["stage0_epochs"]
+        stage1_epochs = config["stage0_epochs"] + config["stage1_epochs"] 
+        stage2_epochs = config["stage0_epochs"] + config["stage1_epochs"] + config["stage2_epochs"]
+        # Stage 0: Train act_model Using GT winners
+        print("\n--- Starting Stage 0: Training Action Model (act_model) with GT winners")
+        stage0_training_config = {
+            "early_stopping": config.get("early_stopping", True),
+            "patience": config.get("patience", 100),
+            "min_delta": config.get("min_delta", 1e-4)
+        }
+        train_eval_loop(
+           train_method="persontoken", # Explicitly train persontoken model
+            training_config=stage0_training_config,
+            train_model=config["train"],
+            obs_model=None, # obs_model is not active as primary here, but its predictions are used via DataLoader
+            act_model=act_model, # Pass act_model as the primary target
+            optimizer=act_optimizer,
+            scheduler=act_scheduler,
+            train_loader=train_loader_act, # Use action model loaders, now updated with generated labels
+            test_loader=test_loader_act,
+            transform=transform,
+            epochs=stage0_epochs,
+            device=device,
+            run_folder=config["run_folder"],
+            wandb_log_freq=config["wandb_log_freq"],
+            print_log_freq=config["print_log_freq"],
+            image_log_freq=config["image_log_freq"],
+            num_images_log=config["num_images_log"],
+            current_epoch=0,  # Stage 0 从0开始
+            use_wandb=config["use_wandb"],
+            eval_fraction=config["eval_fraction"],
+        )
+        print("--- Stage 0 Finished ---") 
+
+        # After Stage 0, generate attention_maps with the trained act_model
+        print("\n--- Generating Attention Maps for Stage 1 ---")
+        train_attention_maps = generate_attnmap(act_model, train_loader_act, device)
+        test_attention_maps = generate_attnmap(act_model, test_loader_act, device)
+
+        for dataset in train_dataset_obs.datasets: # Iterate through individual datasets if ConcatDataset
+            dataset.use_generated_attnmaps = True
+            dataset.set_generated_attention_maps(train_attention_maps)
+        for dataset in test_dataset_obs.datasets:
+            dataset.use_generated_attnmaps = True
+            dataset.set_generated_attention_maps(test_attention_maps)
+        
+        print("Generated attention maps have been loaded into dataset for Stage 1.")
+
         # Stage 1: Train WinnerSelector (obs_model)
+        obs_model, obs_optimizer, obs_scheduler = create_model_and_optimizer("obs", config, device, float(config["lr"]), model_type="obs_model")
         print("\n--- Starting Stage 1: Training WinnerSelector (obs_model) ---")
         stage1_training_config = {
             "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 10),
+            "patience": config.get("patience", 20),
             "min_delta": config.get("min_delta", 1e-4)
         }
         train_eval_loop(
@@ -391,14 +557,14 @@ def main(config):
             train_loader=train_loader_obs,
             test_loader=test_loader_obs,
             transform=transform,
-            epochs=config.get("stage1_epochs", 50), # Use stage-specific epochs
+            epochs=stage1_epochs, # Use stage-specific epochs
             device=device,
             run_folder=config["run_folder"],
             wandb_log_freq=config["wandb_log_freq"],
             print_log_freq=config["print_log_freq"],
             image_log_freq=config["image_log_freq"],
             num_images_log=config["num_images_log"],
-            current_epoch=current_epoch, # Reset current_epoch for each stage if desired, or let train_eval_loop manage
+            current_epoch=stage0_epochs,  # 从 stage0 结束的轮次开始
             use_wandb=config["use_wandb"],
             eval_fraction=config["eval_fraction"],
         )
@@ -423,13 +589,18 @@ def main(config):
 
         # Re-initialize optimizer and scheduler for the action model (optional, but good practice for distinct stages)
         # Assuming we want a fresh start for act_model training
-        act_model, act_optimizer, act_scheduler = create_model_and_optimizer("persontoken", config, device, float(config["lr"]), model_type="act_model")
+        _ , act_optimizer, act_scheduler = create_model_and_optimizer(
+            "persontoken", config, device, float(config["lr"]), 
+            model_type="act_model", 
+            model_instance=act_model
+        )
         print("\n--- Starting Stage 2: Training Action Model (act_model) with Selector Predictions ---")
         stage2_training_config = {
             "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 200),
+            "patience": config.get("patience", 100),
             "min_delta": config.get("min_delta", 1e-4)
         }
+        stage1_epochs = config.get("stage1_epochs", 50)
         train_eval_loop(
             train_method="persontoken", # Explicitly train persontoken model
             training_config=stage2_training_config,
@@ -441,14 +612,14 @@ def main(config):
             train_loader=train_loader_act, # Use action model loaders, now updated with generated labels
             test_loader=test_loader_act,
             transform=transform,
-            epochs=config.get("stage2_epochs", 30) + config.get("stage1_epochs", 50), # Total epochs for consistency, or just stage2_epochs
+            epochs=stage2_epochs,
             device=device,
             run_folder=config["run_folder"],
             wandb_log_freq=config["wandb_log_freq"],
             print_log_freq=config["print_log_freq"],
             image_log_freq=config["image_log_freq"],
             num_images_log=config["num_images_log"],
-            current_epoch=config.get("stage1_epochs", 50), # Start epoch count from end of stage 1
+            current_epoch=stage1_epochs,  # 从 stage0 + stage1 结束的轮次开始
             use_wandb=config["use_wandb"],
             eval_fraction=config["eval_fraction"],
         )
@@ -467,17 +638,16 @@ def main(config):
         }
         
         # Determine which model is the primary for this single-stage run
-        model_to_train = obs_model if config["method"] == "obs" else act_model
         primary_train_method = config["method"]
-        train_loader_use = train_loader_obs if config["method"] == "obs" else train_loader_act
-        test_loader_use = test_loader_obs if config["method"] == "obs" else test_loader_act
+        train_loader_use = train_loader_obs if config["method"] == "dumobs" or config["method"] == "obs" else train_loader_act
+        test_loader_use = test_loader_obs if config["method"] == "dumobs" or config["method"] == "obs" else test_loader_act
         
         train_eval_loop(
             train_method=primary_train_method,
             training_config=single_stage_training_config,
             train_model=config["train"],
-            obs_model=obs_model if config["method"] == "obs" else None, # Pass actual obs_model if needed
-            act_model=act_model if config["method"] != "obs" else None, # Pass actual act_model if needed
+            obs_model=obs_model if config["method"] == "dumobs" or config ["method"] == "obs" else None, # Pass actual obs_model if needed
+            act_model=act_model if config["method"] != "dumobs" or config ["method"] == "obs" else None, # Pass actual act_model if needed
             optimizer=optimizer, # Use the single optimizer
             scheduler=scheduler, # Use the single scheduler
             train_loader=train_loader_use,
@@ -532,7 +702,7 @@ if __name__ == "__main__":
             wandb.config.update(config, allow_val_change=True)
         else:
             wandb.init(
-                mode="offline",
+                #mode="offline",
                 project=config["project_name"],
                 settings=wandb.Settings(start_method="fork"),
                 entity="polluxiaga-nanjing-university",
