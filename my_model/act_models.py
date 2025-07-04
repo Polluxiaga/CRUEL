@@ -2,8 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from torch import Tensor
+from typing import Optional, List, Tuple, Callable
 from efficientnet_pytorch import EfficientNet
+from torchvision.ops.misc import ConvNormActivation
+from torchvision.models._utils import _make_divisible
+from torchvision.models.mobilenetv2 import InvertedResidual
 
 
 class PositionalEncoding(nn.Module):
@@ -80,10 +84,362 @@ class base_MultiLayerDecoder(nn.Module):
         return x, avg_attention_scores
 
 
-class base_model(nn.Module):
+class MobileNetEncoder(nn.Module):
     def __init__(
         self,
-        method: str = "base",
+        num_images: int = 1,
+        channels_per_image: int =3,
+        num_classes: int = 1000,
+        width_mult: float = 1.0,
+        inverted_residual_setting: Optional[List[List[int]]] = None,
+        round_nearest: int = 8,
+        block: Optional[Callable[..., nn.Module]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        dropout: float = 0.2,
+    ) -> None:
+        """
+        MobileNet V2 main class
+        Args:
+            num_images (int): number of images stacked in the input tensor
+            channels_per_image (int): number of channels for each individual image (e.g., 3 for RGB, 4 for RGB+Attention)
+            num_classes (int): Number of classes
+            width_mult (float): Width multiplier - adjusts number of channels in each layer by this amount
+            inverted_residual_setting: Network structure
+            round_nearest (int): Round the number of channels in each layer to be a multiple of this number
+            Set to 1 to turn off rounding
+            block: Module specifying inverted residual building block for mobilenet
+            norm_layer: Module specifying the normalization layer to use
+            dropout (float): The droupout probability
+        """
+        super().__init__()
+
+        if block is None:
+            block = InvertedResidual
+
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        input_channel = 32
+        last_channel = 1280
+
+        if inverted_residual_setting is None:
+            inverted_residual_setting = [
+                # t, c, n, s
+                [1, 16, 1, 1],
+                [6, 24, 2, 2],
+                [6, 32, 3, 2],
+                [6, 64, 4, 2],
+                [6, 96, 3, 1],
+                [6, 160, 3, 2],
+                [6, 320, 1, 1],
+            ]
+
+        # only check the first element, assuming user knows t,c,n,s are required
+        if (
+            len(inverted_residual_setting) == 0
+            or len(inverted_residual_setting[0]) != 4
+        ):
+            raise ValueError(
+                f"inverted_residual_setting should be non-empty or a 4-element list, got {inverted_residual_setting}"
+            )
+
+        # building first layer
+        input_channel = _make_divisible(input_channel * width_mult, round_nearest)
+        self.last_channel = _make_divisible(
+            last_channel * max(1.0, width_mult), round_nearest
+        )
+        features: List[nn.Module] = [
+            ConvNormActivation(
+                num_images * channels_per_image,
+                input_channel,
+                stride=2,
+                norm_layer=norm_layer,
+                activation_layer=nn.ReLU6,
+            )
+        ]
+        # building inverted residual blocks
+        for t, c, n, s in inverted_residual_setting:
+            output_channel = _make_divisible(c * width_mult, round_nearest)
+            for i in range(n):
+                stride = s if i == 0 else 1
+                features.append(
+                    block(
+                        input_channel,
+                        output_channel,
+                        stride,
+                        expand_ratio=t,
+                        norm_layer=norm_layer,
+                    )
+                )
+                input_channel = output_channel
+        # building last several layers
+        features.append(
+            # Conv2dNormActivation(
+            ConvNormActivation(
+                input_channel,
+                self.last_channel,
+                kernel_size=1,
+                norm_layer=norm_layer,
+                activation_layer=nn.ReLU6,
+            )
+        )
+        # make it nn.Sequential
+        self.features = nn.Sequential(*features)
+
+        # # building classifier
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(self.last_channel, num_classes),
+        )
+
+        # weight initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.zeros_(m.bias)
+
+    def _forward_impl(self, x: Tensor) -> Tensor:
+        # This exists since TorchScript doesn't support inheritance, so the superclass method
+        # (this one) needs to have a name other than `forward` that can be accessed in a subclass
+        x = self.features(x)
+        # Cannot use "squeeze" as batch-size can be 1
+        x = nn.functional.adaptive_avg_pool2d(x, (1, 1))
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward_impl(x)
+
+
+class gnm_model(nn.Module):
+    def __init__(
+        self,
+        method: str = "gnm",
+        context_size: int = 5,
+        len_traj_pred: Optional[int] = 5,
+        encoding_size: Optional[int] = 512, # This will now be the main encoding size for observations
+        num_action_params = 2
+    ) -> None:
+        """
+        GNM main class, modified to be solely observation-conditioned (no goal image).
+        Args:
+            method (str): method type
+            context_size (int): how many previous observations to used for context
+            len_traj_pred (int): how many waypoints to predict in the future
+            encoding_size (int): size of the encoding of the observation images
+        """
+        super(gnm_model, self).__init__()
+        self.method = method
+        self.context_size = context_size
+        self.len_traj_pred = len_traj_pred
+        self.obs_encoding_size = encoding_size
+        self.num_action_params = num_action_params
+
+        # Observation MobileNet Encoder: handles (1 + context_size) RGB images
+        # Each RGB image has 3 channels. So total input channels = (1 + context_size) * 3
+        self.obs_mobilenet = MobileNetEncoder(num_images=1 + self.context_size).features
+        
+        # After flattening, compress to obs_encoding_size
+        self.compress_observation = nn.Sequential(
+            nn.Linear(MobileNetEncoder().last_channel, self.obs_encoding_size),
+            nn.ReLU(),
+        )
+
+        # 添加 gaze attention 相关层
+        self.gaze_conv = nn.Conv2d(MobileNetEncoder().last_channel, self.context_size+1, kernel_size=1)
+
+        # Input size is now only self.obs_encoding_size
+        self.linear_layers = nn.Sequential(
+            nn.Linear(self.obs_encoding_size, 256), # Input size changed here
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+        )
+        
+        # Only action predictor remains
+        self.action_predictor = nn.Sequential(
+            nn.Linear(32, self.len_traj_pred * self.num_action_params),
+        )
+
+    def flatten(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Flattens the spatial dimensions of a tensor using adaptive average pooling.
+        Expects input of shape (B, C, H, W) and outputs (B, C).
+        """
+        z = F.adaptive_avg_pool2d(z, (1, 1))
+        z = torch.flatten(z, 1)
+        return z
+
+    def forward(
+        self, obs_img: torch.Tensor # Removed goal_img from input
+    ) -> torch.Tensor: # Only returns action_pred
+        """
+        Forward pass of the GNM model, now solely observation-conditioned.
+        Args:
+            obs_img (torch.Tensor): Batch of observation images.
+                                    Shape: (batch_size, (1 + context_size) * 3, H, W)
+        Returns:
+            action_pred (torch.Tensor): Predicted action trajectory.
+                                        Shape: (batch_size, len_traj_pred, num_action_params)
+        """
+        # Process observation images
+        obs_features = self.obs_mobilenet(obs_img)
+        
+        if self.method in ["gnmgazeaux", "gnmpersonaux"]:
+            # 生成 gaze_use_map
+            gaze_use_map = self.gaze_conv(obs_features)  # [N, 1, H/32, W/32]
+            N, _, H, W = obs_features.shape
+            # 重塑为 batch_size x (context_size+1 * H * W)
+            gaze_use_map = gaze_use_map.permute(0, 2, 3, 1)  # [N, H/32, W/32, context_size+1]
+            gaze_use_map = gaze_use_map.reshape(N, -1)  # [batch_size, (context_size+1)*H*W]
+
+        obs_features = self.flatten(obs_features)
+        obs_features = self.compress_observation(obs_features) # Output: (B, obs_encoding_size)
+
+        # Concatenate observation and goal encodings - NO LONGER A CONCATENATION
+        # Now 'z' directly uses obs_encoding
+        z = self.linear_layers(obs_features) # Input is now just obs_encoding
+
+        # Predict actions
+        action_pred = self.action_predictor(z)
+
+        # Reshape action predictions to the desired trajectory format
+        action_pred = action_pred.reshape(
+            (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
+        )
+
+        # Convert position deltas into waypoints (cumulative sum)
+        action_pred[:, :, :2] = torch.cumsum(action_pred[:, :, :2], dim=1)
+        if self.method in ["gnmgazeaux", "gnmpersonaux"]:
+            return action_pred, gaze_use_map
+        else: 
+            return action_pred
+        
+
+class gnmchannel_model(nn.Module):
+    def __init__(
+        self,
+        method: str = "gnm",
+        context_size: int = 5,
+        len_traj_pred: Optional[int] = 5,
+        encoding_size: Optional[int] = 512, # This will now be the main encoding size for observations
+        num_action_params = 2
+    ) -> None:
+        """
+        GNM main class, modified to be solely observation-conditioned (no goal image).
+        Args:
+            method (str): method type
+            context_size (int): how many previous observations to used for context
+            len_traj_pred (int): how many waypoints to predict in the future
+            encoding_size (int): size of the encoding of the observation images
+        """
+        super(gnmchannel_model, self).__init__()
+        self.method = method
+        self.context_size = context_size
+        self.len_traj_pred = len_traj_pred
+        self.obs_encoding_size = encoding_size
+        self.num_action_params = num_action_params
+
+        # Observation MobileNet Encoder: handles (1 + context_size) RGB images
+        # Each RGB image has 3 channels. So total input channels = (1 + context_size) * 3
+        self.obs_mobilenet = MobileNetEncoder(num_images=1 + self.context_size, channels_per_image=4).features
+        
+        # After flattening, compress to obs_encoding_size
+        self.compress_observation = nn.Sequential(
+            nn.Linear(MobileNetEncoder().last_channel, self.obs_encoding_size),
+            nn.ReLU(),
+        )
+
+        self.gaze_conv = nn. Conv2d(MobileNetEncoder().last_channel, self.context_size+1, kernel_size=1)
+
+        # Input size is now only self.obs_encoding_size
+        self.linear_layers = nn.Sequential(
+            nn.Linear(self.obs_encoding_size, 256), # Input size changed here
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+        )
+        
+        # Only action predictor remains
+        self.action_predictor = nn.Sequential(
+            nn.Linear(32, self.len_traj_pred * self.num_action_params),
+        )
+
+    def flatten(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Flattens the spatial dimensions of a tensor using adaptive average pooling.
+        Expects input of shape (B, C, H, W) and outputs (B, C).
+        """
+        z = F.adaptive_avg_pool2d(z, (1, 1))
+        z = torch.flatten(z, 1)
+        return z
+
+    def forward(
+        self, obs_img: torch.Tensor, attention
+    ): # Only returns action_pred
+        """
+        Forward pass of the GNM model, now solely observation-conditioned.
+        Args:
+            obs_img (torch.Tensor): Batch of observation images.
+                                    Shape: (batch_size, (1 + context_size) * 3, H, W)
+            attention (torch.Tensor): Batch of attention maps.
+                                Shape: (batch_size, (1 + context_size), H, W)
+        Returns:
+            action_pred (torch.Tensor): Predicted action trajectory.
+                                        Shape: (batch_size, len_traj_pred, num_action_params)
+        """
+        batch_size = obs_img.shape[0]
+        num_frames = self.context_size + 1
+
+        rgb_frames = torch.split(obs_img, 3, dim=1)
+        attention_frames = torch.split(attention, 1, dim=1)
+
+        combined_imput_frames=[]
+        for i in range(num_frames):
+            rgb_frame = rgb_frames[i]
+            attn_frame = attention_frames[i]
+            attn_frame = attn_frame.squeeze(2)
+
+            combined_frame = torch.cat([rgb_frame, attn_frame], dim=1)
+            combined_imput_frames.append(combined_frame)
+        
+        # 合并所有时间步的特征
+        obs_input = torch.cat(combined_imput_frames, dim=1)
+
+        obs_features = self.obs_mobilenet(obs_input)
+        
+        obs_features = self.flatten(obs_features)
+        obs_features = self.compress_observation(obs_features)  # Output: (B, obs_encoding_size)
+
+        # Concatenate observation and goal encodings - NO LONGER A CONCATENATION
+        # Now 'z' directly uses obs_encoding
+        z = self.linear_layers(obs_features) # Input is now just obs_encoding
+
+        # Predict actions
+        action_pred = self.action_predictor(z)
+
+        # Reshape action predictions to the desired trajectory format
+        action_pred = action_pred.reshape(
+            (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
+        )
+
+        # Convert position deltas into waypoints (cumulative sum)
+        action_pred[:, :, :2] = torch.cumsum(action_pred[:, :, :2], dim=1)
+
+        return action_pred
+
+
+class vint_model(nn.Module):
+    def __init__(
+        self,
         context_size: int = 5,
         len_traj_pred: int = 3,
         encoder: Optional[str] = "efficientnet-b0",
@@ -93,8 +449,7 @@ class base_model(nn.Module):
         mha_ff_dim_factor: Optional[int] = 4,
     ) -> None:
         
-        super(base_model, self).__init__()
-        self.method = method
+        super(vint_model, self).__init__()
         self.context_size = context_size
         self.len_traj_pred = len_traj_pred
         self.encoding_size = encoding_size
@@ -114,8 +469,6 @@ class base_model(nn.Module):
             self.compress_obs_enc = nn.Linear(self.num_obs_features, self.encoding_size)
         else:
             self.compress_obs_enc = nn.Identity()
-
-        self.gaze_conv = nn.Conv2d(self.num_obs_features, 1, kernel_size=1)
 
         self.decoder = None
         self.action_predictor = nn.Sequential(
@@ -172,13 +525,6 @@ class base_model(nn.Module):
         obs_features = self.obs_encoder.extract_features(obs_img)  # [N, 1280, H/32, W/32]
         N, C, H, W = obs_features.shape  # N = batch_size * (context_size+1)
         
-        if self.method == "cnnaux":
-            # 生成gaze_use_map
-            gaze_use_map = self.gaze_conv(obs_features)
-            gaze_use_map = gaze_use_map.view(self.context_size + 1, -1, 1, H * W).squeeze(2)  # [context_size+1, batch_size, H/32 * W/32]
-            gaze_use_map = gaze_use_map.permute(1, 0, 2) # [batch_size, context_size+1, H/32 * W/32]
-            gaze_use_map = gaze_use_map.reshape(-1, (self.context_size+1)*H*W) # [batch_size, (context_size+1)*H/32*W/32]
-
         # 继续原有的处理流程
         obs_encoding = obs_features.permute(0, 2, 3, 1)  # [N, H/32, W/32, 1280]
         obs_encoding = obs_encoding.reshape(N, H*W, C)  # [N, H/32*W/32, 1280]
@@ -210,12 +556,7 @@ class base_model(nn.Module):
         """ # 清理hook
         handle.remove() """
 
-        # 返回预测结果和中间特征
-        if self.method == "cnnaux":
-            return action_pred, attention_scores, gaze_use_map
-        else:
-            # 如果不是cnnaux方法，则不需要gaze_use_map, 仅返回动作预测和原始观察特征
-            return action_pred, attention_scores
+        return action_pred, attention_scores
 
     """ @torch.utils.hooks.unserializable_hook
     def _capture_obs_features_grad(self, grad):
@@ -267,6 +608,8 @@ class channel_model(nn.Module):
             with torch.no_grad():
                 sample_rgb = obs_img[0:1, 0:3]
                 sample_attn = attention[0:1, 0:1]
+                if len(sample_attn.shape) > 4:
+                    sample_attn = sample_attn.squeeze(2)  # 移除多余的维度
                 sample_input = torch.cat([sample_rgb, sample_attn], dim=1)
                 sample_features = self.obs_encoder.extract_features(sample_input)
                 H_feature = sample_features.shape[2]  # H/32
@@ -288,6 +631,8 @@ class channel_model(nn.Module):
         #  合并RGB和attention通道
         combined_input=[]
         for rgb, attn in zip(obs_img, attention):
+            if len(attn.shape) > 4:
+                attn = attn.squeeze(2)
             combined = torch.cat([rgb, attn], dim=1)  # [batch_size, 4, H, W]
             combined_input.append(combined)
 
@@ -409,6 +754,8 @@ class catoken_model(nn.Module):
             rgb_feat = rgb_feat + self.rgb_modality_embedding
             rgb_features_list.append(rgb_feat)
 
+            if len(attn.shape) > 4:
+                attn = attn.squeeze(2)
             # Process attention
             attn_feat = self.attn_encoder.extract_features(attn)  # [batch_size, C, H/32, W/32]
             attn_feat = attn_feat.permute(0 ,2 , 3, 1).reshape(N, H*W, C)  # [batch_size, C]

@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Tuple
 from efficientnet_pytorch import EfficientNet
-from my_model.backbone import CustomTransformerEncoderLayer
+from my_model.act_models import CustomTransformerEncoderLayer
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_seq_len: int = 50):
@@ -273,3 +274,194 @@ class WinnerSelectorPlus(nn.Module):
         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
 
         return logits, normalized_rgb_attention_sequence
+    
+
+class GazePredictorPlus(nn.Module):
+    def __init__(
+        self,
+        image_width: int = 160,
+        image_height: int = 128,
+        context_size: int = 5,
+        encoder_rgb_name: str = 'efficientnet-b0',
+        encoding_size: int = 512,
+        ctx_mha_heads: int = 8,
+        ctx_mha_layers: int = 2,
+        ctx_ff_dim_factor: int = 4,
+        gaze_seq_mha_heads: int = 8,
+        gaze_seq_mha_layers: int = 2,
+        gaze_seq_ff_dim_factor: int = 4,
+        dropout_rate: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.image_width = image_width
+        self.image_height = image_height
+
+        self.N = context_size + 1 # Total number of frames (context + current)
+        self.context_size = context_size
+        self.D = encoding_size
+
+        self.spatial_flatten_len = 4 * 5 # Assuming EfficientNet-B0 and 128x160 -> 4x5 feature map
+        self.max_total_seq_len = self.N * self.spatial_flatten_len
+
+        if self.D % ctx_mha_heads != 0:
+            raise ValueError("encoding_size must be divisible by ctx_mha_heads")
+        if self.D % gaze_seq_mha_heads != 0:
+            raise ValueError("encoding_size must be divisible by mask_seq_mha_heads")
+
+        # RGB encoder
+        self.rgb_cnn_encoder = EfficientNet.from_name(encoder_rgb_name, include_top=False)
+        in_feats_rgb = 1280
+        self.compress_rgb = nn.Conv2d(in_feats_rgb, self.D, kernel_size=1)
+
+        # Gaze encoder
+        self.gaze_map_cnn_encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1), nn.ReLU(inplace=True), # 128x160 -> 64x80
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(inplace=True), # 64x80 -> 32x40
+            nn.Conv2d(32, self.D, kernel_size=3, stride=8, padding=1), nn.ReLU(inplace=True), # 32x40 -> 4x5
+        )
+
+        self.pos_encoder_n_frames = PositionalEncoding(self.D, max_seq_len=self.max_total_seq_len)
+
+        self.rgb_context_transformer_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(
+                d_model=self.D, nhead=ctx_mha_heads, dim_feedforward=self.D * ctx_ff_dim_factor,
+                dropout=dropout_rate, batch_first=True, norm_first=True
+            ) for _ in range(ctx_mha_layers)
+        ])
+
+        gaze_seq_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.D, nhead=gaze_seq_mha_heads, dim_feedforward=self.D * gaze_seq_ff_dim_factor,
+            dropout=dropout_rate, batch_first=True, norm_first=True
+        )
+        self.gaze_sequence_transformer = nn.TransformerEncoder(gaze_seq_encoder_layer, num_layers=gaze_seq_mha_layers)
+
+        # Fusion and Prediction head
+        # This head needs to output N * 2 values for each batch,
+        # or be applied N times.
+        # Let's make it operate on concatenated features, then reshape.
+        self.fusion_predictor = nn.Sequential(
+            nn.LayerNorm(self.D * 2), # Input to the first linear layer
+            nn.Linear(self.D * 2, self.D), nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(self.D, 2) # Output 2 coordinates
+        )
+
+    def forward(self, rgb_imgs: torch.Tensor, prev_gaze_maps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # rgb_imgs: [B, N*3, H, W]
+        # prev_gaze_maps: [B, context_size, H, W]
+        B, C_total_rgb, H_rgb, W_rgb = rgb_imgs.shape
+        _, num_prev_gaze_frames, H_gaze, W_gaze = prev_gaze_maps.shape
+
+        assert C_total_rgb == self.N * 3, \
+            f"Input rgb_imgs channels ({C_total_rgb}) must be N*3 ({self.N*3})"
+        assert num_prev_gaze_frames == self.context_size, \
+            f"Input prev_gaze_maps frames ({num_prev_gaze_frames}) must be context_size ({self.context_size})"
+        assert H_gaze == self.image_height and W_gaze == self.image_width, \
+            "Gaze map dimensions must match model's image_height and image_width"
+
+        # --- RGB Path ---
+        # Process each of the N frames independently through CNN, then combine for Transformer
+        flat_rgb = rgb_imgs.view(B * self.N, 3, H_rgb, W_rgb)
+        rgb_feats_per_frame = self.rgb_cnn_encoder.extract_features(flat_rgb) # (B*N, C_out, 4, 5)
+        rgb_feats_per_frame = self.compress_rgb(rgb_feats_per_frame) # (B*N, D, 4, 5)
+
+        # Flatten spatial dimensions and reshape for Transformer input
+        # (B*N, D, 4, 5) -> (B*N, D, 20) -> (B*N, 20, D)
+        rgb_feats_spatial_flattened = rgb_feats_per_frame.flatten(2).transpose(1, 2)  
+        
+        # Reshape to (B, N * spatial_flatten_len, D) for the transformer
+        rgb_feats_sequence_for_transformer = rgb_feats_spatial_flattened.reshape(
+            B, self.N * self.spatial_flatten_len, self.D
+        )
+        
+        # Apply positional encoding
+        rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats_sequence_for_transformer)
+        
+        # RGB Context Transformer layers
+        rgb_attn_weights_list = []
+        rgb_out = rgb_feats_pe
+        for layer in self.rgb_context_transformer_layers:
+            rgb_out, attn_weights = layer(rgb_out) 
+            num_heads_current_layer = attn_weights.shape[0] // B
+            attn_weights_reshaped = attn_weights.view(
+                B, num_heads_current_layer, attn_weights.shape[1], attn_weights.shape[2]
+            )
+            rgb_attn_weights_list.append(attn_weights_reshaped)
+
+        # Calculate average attention matrix across all layers and heads
+        if rgb_attn_weights_list:
+            stacked_attn_weights = torch.stack(rgb_attn_weights_list, dim=0)  
+            avg_rgb_attention_matrix = torch.mean(stacked_attn_weights, dim=[0, 2])  
+        else:
+            print("No RGB Transformer layers, returning dummy attention.")
+            avg_rgb_attention_matrix = torch.empty(
+                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len, 
+                device=rgb_imgs.device
+            )
+
+        # Extract RGB Token Attention Map (for auxiliary loss)
+        rgb_token_saliency = avg_rgb_attention_matrix.sum(dim=1) 
+        normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1) 
+        
+        # Reshape `rgb_out` back to include the N dimension explicitly for fusion.
+        # (B, N * spatial_flatten_len, D) -> (B, N, spatial_flatten_len, D)
+        rgb_out_per_frame = rgb_out.reshape(B, self.N, self.spatial_flatten_len, self.D)
+        # Average across spatial tokens to get (B, N, D)
+        rgb_frame_summary = rgb_out_per_frame.mean(dim=2) # (B, N, D)
+
+
+        # --- Gaze Map Path (原 Mask Path) ---
+        # Process each of the context_size previous gaze maps
+        # prev_gaze_maps: [B, context_size, H, W]
+        flat_gaze = prev_gaze_maps.view(B * self.context_size, 1, H_gaze, W_gaze).float()
+        gaze_feats = self.gaze_map_cnn_encoder(flat_gaze) # (B * context_size, D, 4, 5)
+
+        gaze_feats_spatial = gaze_feats.flatten(2).transpose(1, 2) # (B * context_size, 20, D)
+        gaze_feats_reshaped_for_transformer = gaze_feats_spatial.reshape(
+            B, self.context_size * self.spatial_flatten_len, self.D
+        )
+        
+        # 应用 positional encoding
+        gaze_feats_pe = self.pos_encoder_n_frames(gaze_feats_reshaped_for_transformer)
+
+        # Gaze sequence transformer
+        gaze_out = self.gaze_sequence_transformer(gaze_feats_pe) # (B, context_size * 20, D)
+        
+        # Reshape gaze_out to (B, context_size, spatial_flatten_len, D)
+        gaze_out_per_frame = gaze_out.reshape(B, self.context_size, self.spatial_flatten_len, self.D)
+        # Average across spatial tokens for each frame: (B, context_size, D)
+        gaze_frame_summary = gaze_out_per_frame.mean(dim=2) # (B, context_size, D)
+
+
+        # --- Fusion and Prediction for the CURRENT (LAST) frame ---
+        # rgb_frame_summary: (B, N, D) -> features for frames [t-context_size, ..., t]
+        # gaze_frame_summary: (B, context_size, D) -> features for frames [t-context_size, ..., t-1]
+
+        # Extract RGB feature for the CURRENT frame (last frame in the N sequence)
+        rgb_curr_frame_feat = rgb_frame_summary[:, -1, :] # (B, D)
+
+        # Extract Gaze feature for the LAST AVAILABLE PREVIOUS frame (last frame in the context_size sequence)
+        # This corresponds to the gaze map for frame (t-1)
+        gaze_prev_frame_feat = gaze_frame_summary[:, -1, :] # (B, D)
+
+        # Concatenate these features for the current prediction
+        fused_features_for_current_frame = torch.cat(
+            [rgb_curr_frame_feat, gaze_prev_frame_feat], 
+            dim=-1 # (B, 2D)
+        )
+        
+        # Predict raw coordinates for the current frame
+        raw_fixations = self.fusion_predictor(fused_features_for_current_frame) # (B, 2)
+        
+        # Apply sigmoid for normalization
+        normalized_coords = torch.sigmoid(raw_fixations)
+
+        # Scale to image pixel coordinates
+        fixation_point_x = normalized_coords[:, 0] * (self.image_width - 1)
+        fixation_point_y = normalized_coords[:, 1] * (self.image_height - 1)
+        
+        # Combine into final fixation point (B, 2)
+        fixation_point = torch.stack((fixation_point_x, fixation_point_y), dim=1) # (B, 2)
+
+        return fixation_point, normalized_rgb_attention_sequence

@@ -312,6 +312,186 @@ def action_visualize(
     if use_wandb:
         wandb.log({f"{mode}_action_prediction": wandb_list}, commit=False)
 
+def gaze_draw(
+    obs_imgs: list,
+    pred_fixation: np.ndarray,  # [1, 2] - x,y coordinates for current frame only
+    label_fixation: np.ndarray,  # [T, 2] - x,y coordinates for all frames
+    attention_scores: np.ndarray,  # [120] = [6*h*w] already computed as received_by_token
+    save_path: Optional[str] = None,
+    display: Optional[bool] = False,
+):
+    """
+    Creates a 3x3 visualization layout:
+    - Row 1: Bar chart of attention received by each token (spans all 3 columns)
+    - Rows 2 & 3: 6 observation images with attention heatmaps and fixation points
+    GT fixations are drawn on all frames, predicted fixation only on the last frame
+    """
+    scale_x = 3.125
+    scale_y = 3.125
+
+    # Scale fixation coordinates
+    scaled_pred_fixation = pred_fixation.copy()
+    scaled_pred_fixation[:, 0] *= scale_x
+    scaled_pred_fixation[:, 1] *= scale_y
+
+    scaled_label_fixation = label_fixation.copy()
+    scaled_label_fixation[:, 0] *= scale_x
+    scaled_label_fixation[:, 1] *= scale_y
+
+    fig = plt.figure(figsize=(24, 24))
+    gs = gridspec.GridSpec(3, 3, figure=fig)
+
+    # Row 1: Bar chart spanning all columns
+    ax_received_attn = fig.add_subplot(gs[0, :])
+    bars = ax_received_attn.bar(
+        np.arange(attention_scores.shape[0]),
+        attention_scores,
+        color='skyblue'
+    )
+    ax_received_attn.set_title("Attention Received by Each Token", fontsize=18)
+    ax_received_attn.set_xlabel("Token Index", fontsize=14)
+    ax_received_attn.set_ylabel("Total Attention Received", fontsize=14)
+    ax_received_attn.tick_params(labelsize=12)
+    ax_received_attn.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Add numerical labels on bars
+    for bar in bars:
+        height = bar.get_height()
+        ax_received_attn.annotate(f'{height:.2f}',
+                                xy=(bar.get_x() + bar.get_width() / 2, height),
+                                xytext=(0, 3),
+                                textcoords="offset points",
+                                ha='center', va='bottom', fontsize=10)
+
+    # Calculate attention scores per frame
+    h, w = FEATURE_SIZE
+    tokens_per_frame = h * w
+    attention_per_frame = attention_scores.reshape(6, tokens_per_frame)  # [6, h*w]
+
+    # Rows 2 & 3: 6 Observation Images with heatmaps and fixation points
+    num_frames = len(obs_imgs)
+    for idx, img in enumerate(obs_imgs):
+        if idx >= num_frames:
+            break
+            
+        row = 1 + idx // 3
+        col = idx % 3
+        
+        ax_img_overlay = fig.add_subplot(gs[row, col])
+        
+        # Convert image to numpy array and get dimensions
+        obs_img_np = np.array(img)
+        img_h, img_w = obs_img_np.shape[:2]
+        
+        # Create attention heatmap
+        if idx < len(attention_per_frame):
+            # Reshape attention scores for the current frame to feature map size
+            frame_attention = attention_per_frame[idx].reshape(h, w)
+            
+            # Normalize attention scores to [0,1] range
+            frame_attention = (frame_attention - frame_attention.min()) / (frame_attention.max() - frame_attention.min() + 1e-8)
+            
+            # Resize feature map-sized attention map to image size
+            heatmap = cv2.resize(frame_attention, (img_w, img_h))
+            heatmap = np.uint8(255 * heatmap)
+            heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+            heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        else:
+            heatmap = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+        # Overlay heatmap on original image
+        heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
+        
+        # Display the overlay image
+        ax_img_overlay.imshow(heatmap_img)
+        
+        # Always draw GT fixation points on all frames
+        ax_img_overlay.scatter(
+            scaled_label_fixation[idx][0],
+            scaled_label_fixation[idx][1],
+            color='magenta',
+            marker='x',
+            s=100,
+            label='Ground Truth Fixation' if idx == 0 else ""
+        )
+        
+        # Only draw predicted fixation on the last frame
+        if idx == num_frames - 1:  # Last frame
+            ax_img_overlay.scatter(
+                scaled_pred_fixation[0][0],  # Using [0] since pred has only one point
+                scaled_pred_fixation[0][1],
+                color='cyan',
+                marker='o',
+                s=100,
+                label='Predicted Fixation'
+            )
+            ax_img_overlay.legend()
+            
+        ax_img_overlay.set_title(f"Frame {idx+1} with Attention", fontsize=16)
+        ax_img_overlay.axis('off')
+
+    plt.tight_layout()
+    
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight", dpi=300)
+
+    if not display:
+        plt.close(fig)
+
+
+def gaze_visualize(
+    batch_obs_images: np.ndarray,  # [B, T, 3, H, W]
+    batch_pred_fixation: np.ndarray,  # [B, 2]
+    batch_label_fixations: np.ndarray,  # [B, T, 2]
+    attention_scores: np.ndarray,
+    mode: str,
+    save_folder: str,
+    epoch: int,
+    num_images_log: int = 8,
+    use_wandb: bool = True,
+    display: bool = False,
+):
+    """
+    Visualize gaze prediction results with attention visualization.
+    """
+    visualize_path = None
+    if save_folder is not None:
+        visualize_path = os.path.join(
+            save_folder, "visualize", mode, f"epoch{epoch}", "gaze_prediction"
+        )
+
+    if not os.path.exists(visualize_path):
+        os.makedirs(visualize_path)
+
+    batch_size = batch_obs_images.shape[0]
+    wandb_list = []
+    
+    for i in range(min(batch_size, num_images_log)):
+        obs_imgs = []
+        for j in range(batch_obs_images.shape[1]):
+            obs_imgs.append(np2img(batch_obs_images[i][j]))  # T * [C, H, W]
+
+        pred_fixation = batch_pred_fixation
+        label_fixation = batch_label_fixations[i]
+        attention_score = attention_scores[i]
+
+        save_path = None
+        if visualize_path is not None:
+            save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
+
+        gaze_draw(
+            obs_imgs,
+            pred_fixation,
+            label_fixation,
+            attention_score,
+            save_path,
+            display,
+        )
+        if use_wandb:
+            wandb_list.append(wandb.Image(save_path))
+    if use_wandb:
+        wandb.log({f"{mode}_gaze_prediction": wandb_list}, commit=False)
+    
 
 def plot_confusion_bar(pred_select:np.array, label_select:np.array, ax:plt.Axes):
     """

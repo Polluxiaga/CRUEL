@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import torch.nn.functional as F
 import argparse
 import tqdm
@@ -37,9 +37,9 @@ import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
 from my_data.my_dataset import ObsDataset, ActDataset
-from my_model.backbone import base_model, channel_model, catoken_model
-from my_model.selectors import WinnerSelector, WinnerSelectorPlus
-from my_training.my_train_utils import act_person_collate_fn, obs_person_collate_fn, act_base_collate_fn
+from my_model.act_models import vint_model, channel_model, catoken_model, gnm_model, gnmchannel_model
+from my_model.observe_models import WinnerSelectorPlus, GazePredictorPlus
+from my_training.my_train_utils import act_person_collate_fn, obs_person_collate_fn, act_base_collate_fn, obs_base_collate_fn, render_fixations_to_gaze_maps
 from my_training.my_train_eval_loop import train_eval_loop, load_model
 
 
@@ -47,17 +47,20 @@ def generate_attnmap(
     model: nn.Module,
     dataloader: DataLoader, # This DataLoader MUST provide (obs_img, attention, ...) compatible with catoken_model
     device: torch.device,
-) -> List[torch.Tensor]:
+    save_path: str
+):
     """
-    Generate the RGB attention maps from the act_model (catoken_model) for supervision.
-    The attention maps will be returned as a list of tensors, where each tensor corresponds
-    to an unpadded sample from the original dataset and has shape (N * spatial_flatten_len).
-    This represents the softmax-normalized attention distribution over only the RGB spatial tokens.
+    Generate the RGB attention maps from the act_model (catoken_model) for supervision
+    and save them to disk.
 
-    Returns:
-        A list of torch.Tensor, where each tensor is the (N * spatial_flatten_len)
-        attention map for a single sample, ordered by its original dataset index.
+    Args:
+        model (nn.Module): The act_model (catoken_model) to generate attention maps from.
+        dataloader (DataLoader): DataLoader providing (obs_img, attention, ...) compatible with catoken_model.
+        device (torch.device): The device (CPU or GPU) to run the model on.
+        save_path (str): The file path where the list of attention maps will be saved.
+                         Example: "data_splits/train/genattnmap.pt"
     """
+
     model.eval() # Set model to evaluation mode
     
     total_samples = len(dataloader.dataset)
@@ -72,12 +75,11 @@ def generate_attnmap(
     spatial_flatten_len_val = None
 
     with torch.no_grad():
-        tqdm_iter = tqdm.tqdm(dataloader, desc="Generating act_model Attention Maps", dynamic_ncols=True)
+        tqdm_iter = tqdm.tqdm(dataloader, desc="Generating persontoken Attention Maps", dynamic_ncols=True)
         for batch_data in tqdm_iter:
             # Unpack the batched data, matching persontoken_train's data unpacking
             (
                 obs_image,
-                _, # Unused from dataloader (e.g., gaze_map)
                 person_masks,
                 select_labels,
                 _, # Unused (e.g., action_label)
@@ -139,18 +141,197 @@ def generate_attnmap(
                 single_sample_attn_map = normalized_rgb_attention_sequence[i_sample_in_batch].cpu()
                 all_unpadded_rgb_attention_maps[original_dataset_idx] = single_sample_attn_map
     
-    return all_unpadded_rgb_attention_maps
+    # Save the generated attention maps to disk
+    output_name = "attnmap_used.pt"
+    full_save_path = os.path.join(save_path, output_name)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure directory exists
+    torch.save(all_unpadded_rgb_attention_maps, full_save_path)
+    print(f"Generated {output_name} saved to: {save_path}")
 
 
-def generate_selector_predictions(
+def generate_gaze(
+        method: str,
+        model: nn. Module,
+        dataloader: DataLoader, # This DataLoader MUST use obs_base_collate_fn
+        device: torch.device,
+        save_path: str,
+        H: int=128,
+        W: int=160,
+        context_size: int=5,
+        sigma: float = 10.0
+):
+    """
+    Generates gaze maps from predicted fixation data (obtained from the GazePredictor(plus))
+    by applying Gaussian kernels and saves them to disk.
+
+    Args:
+        model (nn.Module): The Gaze Prediction Model that outputs fixations given obs_images.
+        dataloader (DataLoader): DataLoader that provides batch_data including obs_images.
+                                 It should return (obs_images, ..., original_indices_batch).
+        device (torch.device): The device (CPU or GPU) to run the model and operations on.
+        save_path (str): The directory path where the generated gaze maps will be saved.
+        H (int): Height of the image/gaze map.
+        W (int): Width of the image/gaze map.
+        context_size (int): Number of context frames. Total frames will be context_size + 1.
+        sigma (float): Standard deviation for the Gaussian kernel.
+    """
+    model.eval() # Set model to evaluation mode for prediction
+    
+    # Store generated gaze maps as { (traj_name, curr_time): single_predicted_gaze_map_tensor }
+    # This will be used by ActDataset to look up individual predicted gaze maps.
+    all_generated_gaze_maps_individual: Dict[Tuple[str, int], torch.Tensor] = {}
+
+    # Pre-generate meshgrid for the image size, move to device
+    x_coords = torch.arange(0, W, device=device)
+    y_coords = torch.arange(0, H, device=device)
+    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
+
+    tqdm_iter = tqdm.tqdm(dataloader, desc=f"Generating {method} Individual Gaze Maps", dynamic_ncols=True)
+    
+    # Access the dataset instance to get trajectory names and current times
+    dataset_instance = dataloader.dataset
+    
+    # 检查是否是 ConcatDataset
+    if isinstance(dataset_instance, torch.utils.data.ConcatDataset):
+        print("Detected ConcatDataset. Building combined samples_index from constituent datasets.")
+        combined_samples_index = []
+        for ds in dataset_instance.datasets:
+            # 确保每个子数据集都有 samples_index 属性
+            if hasattr(ds, 'samples_index'):
+                combined_samples_index.extend(ds.samples_index)
+            else:
+                raise AttributeError(
+                    f"A dataset within ConcatDataset ({type(ds)}) is missing 'samples_index' attribute."
+                    "Ensure all concatenated datasets are derived from BaseDataset or ActDataset."
+                )
+        # 使用组合后的索引列表进行查找
+        effective_samples_index = combined_samples_index
+        print(f"Combined samples_index length: {len(effective_samples_index)}")
+    else:
+        # 如果不是 ConcatDataset，则直接使用数据集自身的 samples_index
+        if not hasattr(dataset_instance, 'samples_index'):
+            raise AttributeError("Dataloader's dataset must have a 'samples_index' attribute (e.g., from BaseDataset).")
+        effective_samples_index = dataset_instance.samples_index
+
+
+    with torch.no_grad():
+        for batch_data in tqdm_iter:
+            # Unpack the batched data based on ActDataset __getitem__ return:
+            # (obs_images_N_frames_stacked, gaze_maps_all_N_frames_gt, person_masks, winner_labels_to_return, actions, original_indices_batch)
+            obs_images_N_frames_stacked, fixations_all_N_frames_gt, _, _, original_indices_batch = batch_data 
+            
+            # Move data to device
+            obs_images_N_frames_stacked = obs_images_N_frames_stacked.to(device) # [B, (N_frames)*3, H, W]
+            
+            fixations_all_N_frames_gt = fixations_all_N_frames_gt.to(device)
+            prev_fixation = fixations_all_N_frames_gt[:, :-1, :]  # [B, C, 2] - previous fixations
+
+            prev_gaze_maps_for_model = render_fixations_to_gaze_maps(
+                fixations_batch=prev_fixation,
+                H=128, # 使用传入的图像高度
+                W=160,  # 使用传入的图像宽度
+                sigma=10.0, # 使用传入的高斯核标准差
+                device=device
+            )
+
+            # --- Obtain predicted fixation for the CURRENT (last) frame from the model ---
+            # model outputs (fixation_point_current_frame, attention_map)
+            predicted_fixations_current_frame_batch, _ = model(obs_images_N_frames_stacked, prev_gaze_maps_for_model) # [B, 2]
+
+            for i_sample_in_batch in range(predicted_fixations_current_frame_batch.shape[0]):
+                original_dataset_idx = original_indices_batch[i_sample_in_batch].item() # Get as scalar int
+                
+                # Retrieve (traj_name, curr_time) for this specific sample
+                traj_name, curr_time = effective_samples_index[original_dataset_idx]
+                
+                # Create empty gaze map for this specific current frame prediction
+                single_predicted_gaze_map = torch.zeros((1, H, W), dtype=torch.float32, device=device)
+                
+                fx, fy = predicted_fixations_current_frame_batch[i_sample_in_batch].detach().cpu().numpy() 
+
+                # Ensure fixation is valid numbers and within bounds
+                if not (np.isnan(fx) or np.isnan(fy)):
+                    fx_int = round(float(fx))
+                    fy_int = round(float(fy))
+                    
+                    if 0 <= fx_int < W and 0 <= fy_int < H:
+                        gaussian = torch.exp(-((x_grid - fx_int)**2 + (y_grid - fy_int)**2) / (2 * sigma**2))
+                        if gaussian.max() > 0:
+                            gaussian = gaussian / gaussian.max() # Normalize to [0, 1]
+                        single_predicted_gaze_map[0] = gaussian # Assign to single-channel map
+
+                # Store the generated single-frame gaze map with its (traj_name, curr_time) key
+                all_generated_gaze_maps_individual[(traj_name, curr_time)] = single_predicted_gaze_map.cpu()
+    
+    underlying_datasets = dataloader.dataset.datasets if isinstance(dataloader.dataset, torch.utils.data.ConcatDataset) else [dataloader.dataset]
+
+    print("\nPopulating initial context frames with GT gaze maps...")
+    num_added_gt = 0
+    
+    # 使用 tqdm 包装外部循环，提供进度条
+    for ds_idx, ds in enumerate(tqdm.tqdm(underlying_datasets, desc="Processing underlying datasets for GT fill")):
+        if not hasattr(ds, 'samples_index') or not hasattr(ds, '_get_trajectory') or not hasattr(ds, '_load_gazemaps'):
+            print(f"Warning: Underlying dataset {type(ds)} (index {ds_idx}) does not support required methods (_get_trajectory, _load_gazemaps) for GT fill. Skipping.")
+            continue
+        
+        # 收集该数据集实例中所有唯一的轨迹名称
+        unique_traj_names_in_ds = sorted(list(set(item[0] for item in ds.samples_index)))
+
+        for traj_name in tqdm.tqdm(unique_traj_names_in_ds, desc=f"Filling GT for traj in DS {ds_idx}", leave=False):
+            try:
+                # 获取该轨迹的总长度，以确保不会访问越界的帧
+                # 假设 _get_trajectory(traj_name) 能返回一个可获取长度的数据结构
+                traj_data = ds._get_trajectory(traj_name) 
+                traj_len = len(traj_data)
+            except Exception as e:
+                print(f"Warning: Could not get trajectory length for {traj_name} from dataset {type(ds)}. Error: {e}. Skipping GT fill for this trajectory.")
+                continue
+
+            for t in range(min(context_size, traj_len)): 
+                key = (traj_name, t)
+                
+                # 检查该键是否已经存在于字典中（理论上不应存在，因为这些 t < context_size）
+                if key not in all_generated_gaze_maps_individual:
+                    try:
+                        # 从该数据集实例加载地面真实注视图
+                        gt_gaze_map = ds._load_gazemaps(traj_name, t).cpu() 
+                        all_generated_gaze_maps_individual[key] = gt_gaze_map
+                        num_added_gt += 1
+                    except Exception as e:
+                        print(f"Warning: Failed to load GT gaze map for {key}. Error: {e}. Skipping this frame.")
+    
+    print(f"Added {num_added_gt} GT gaze maps for initial context frames (t < {context_size}).")
+
+    # Save the generated predictions to disk
+    output_filename = f"{method}.pt" # Example: "gaze.pt"
+    full_save_file_path = os.path.join(save_path, output_filename)
+    os.makedirs(save_path, exist_ok=True)
+    
+    torch.save(all_generated_gaze_maps_individual, full_save_file_path)
+    print(f"Individual predicted gaze maps saved to: {full_save_file_path}")
+
+    if all_generated_gaze_maps_individual:
+        # Print an example key-value pair
+        example_key = next(iter(all_generated_gaze_maps_individual.keys()))
+        print(f"Example cached gaze map entry: Key={example_key}, Shape={all_generated_gaze_maps_individual[example_key].shape}")
+
+
+def generate_1phase_winners(
+    method: str,
     model: nn.Module,
     dataloader: DataLoader, # This DataLoader MUST use obs_person_collate_fn
     device: torch.device,
-) -> List[torch.Tensor]:
+    save_path: str
+):
     """
-    Generate selector predictions for a single dataset split.
-    The predictions will be binary masks similar to winner_labels,
-    returned as a list of boolean tensors (unpadded, as per __getitem__ output).
+    Generate selector predictions (binary masks) from the obs_model and save them to disk.
+
+    Args:
+        model (nn.Module): The obs_model (WinnerSelector/WinnerSelectorPlus) to generate predictions from.
+        dataloader (DataLoader): DataLoader using obs_person_collate_fn.
+        device (torch.device): The device (CPU or GPU) to run the model on.
+        save_path (str): The file path where the list of predictions will be saved.
+                         Example: "data_splits/train/1phase_winners.pt", "data_splits/train/1phaseplus_winners.pt"
     """
     model.eval() # Set model to evaluation mode for prediction
     
@@ -158,7 +339,7 @@ def generate_selector_predictions(
     all_unpadded_predictions = [None] * total_samples # Initialize list to store results in original dataset order
     
     with torch.no_grad():
-        tqdm_iter = tqdm.tqdm(dataloader, desc="Generating Selector Predictions", dynamic_ncols=True)
+        tqdm_iter = tqdm.tqdm(dataloader, desc=f"Generating {method} Winners", dynamic_ncols=True)
         for batch_data in tqdm_iter:
             # Unpack the batched data from obs_person_collate_fn
             obs_batch, mask_batch, attnmap_batch, _, invalid_flag_batch, original_indices_batch = batch_data
@@ -171,6 +352,7 @@ def generate_selector_predictions(
             original_indices_list = original_indices_batch.cpu().tolist() # Get original dataset indices
 
             logits, _ = model(obs_batch, mask_batch, invalid_flag_batch) # (B, P_max)
+
             batched_preds_bool = (logits > 0).cpu().bool() # Convert logits to boolean predictions (B, P_max)
             
             # Iterate through each sample in the current batch
@@ -184,11 +366,14 @@ def generate_selector_predictions(
                 # Store the unpadded prediction in the master list at its original index
                 all_unpadded_predictions[original_dataset_idx] = unpadded_pred
                 
-    print(f"Generated {len(all_unpadded_predictions)} selector prediction samples in memory.")
+    # Save the generated predictions to disk
+    output_name = f"{method}.pt"
+    full_save_path = os.path.join(save_path, output_name)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure directory exists
+    torch.save(all_unpadded_predictions, full_save_path)
+    print(f"Generated {output_name} saved to: {save_path}")
     if len(all_unpadded_predictions) > 0:
         print(f"Example cached prediction shape (first sample): {all_unpadded_predictions[0].shape}")
-    
-    return all_unpadded_predictions
 
 
 def create_model_and_optimizer(method_type, config, device, lr, model_type="act_model", model_instance=None):
@@ -196,14 +381,15 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
     model = model_instance
     if model is None:
         if model_type == "obs_model":
-            if method_type == "dumobs":
-                model = WinnerSelector(
+            if method_type in ["gaze", "gazeplus"]:
+                model = GazePredictorPlus(
                     context_size=config["context_size"],
                 ).to(device)
-            elif method_type == "obs":
+            elif method_type in ["1phase", "1phaseplus"]:
                 model = WinnerSelectorPlus(
                     context_size=config["context_size"],
                 ).to(device)
+
         elif model_type == "act_model":
             if method_type in ["gazechannel", "personchannel"]:
                 model = channel_model(
@@ -227,9 +413,8 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
                     mha_num_attention_layers=config["mha_num_attention_layers"],
                     mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 ).to(device)
-            elif method_type in ["base", "cnnaux", "gazeaux", "personaux"]:
-                 model = base_model(
-                    method=method_type,
+            elif method_type in ["vint", "cnnaux", "gazeaux", "personaux"]:
+                 model = vint_model(
                     context_size=config["context_size"],
                     len_traj_pred=config["len_traj_pred"],
                     encoder=config["obs_encoder"],
@@ -237,6 +422,19 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
                     mha_num_attention_heads=config["mha_num_attention_heads"],
                     mha_num_attention_layers=config["mha_num_attention_layers"],
                     mha_ff_dim_factor=config["mha_ff_dim_factor"],
+                ).to(device)
+            elif method_type in ["gnm", "gnmgazeaux", "gnmpersonaux"]:
+                model = gnm_model( 
+                    method=method_type,
+                    context_size=config["context_size"],
+                    len_traj_pred=config["len_traj_pred"],
+                    encoding_size=config["encoding_size"],
+                ).to(device)
+            elif method_type in ["gnmgazechannel", "gnmpersonchannel"]:
+                model = gnmchannel_model( 
+                    context_size=config["context_size"],
+                    len_traj_pred=config["len_traj_pred"],
+                    encoding_size=config["encoding_size"],
                 ).to(device)
             else:
                 raise ValueError(f"Unknown method type for act_model: {method_type}")
@@ -322,332 +520,243 @@ def main(config):
     ])
     transform = transforms.Compose(transform)
 
-    # Initialize models for multi-stage training or single stage
-    obs_model = None
-    act_model = None
-
-    # DataLoader preparation - datasets and collate_fns
-    # For "phase" training, we need two sets of datasets:
-    # 1. For Stage 1 (obs_model training): use_generated_labels=False
-    # 2. For Stage 2/3 (act_model training): use_generated_labels=True, with generated predictions
-    
-    # Create datasets for obs_model training (Stage 1 of "phase", or if method is "dumobs" or "obs")
-    train_dataset_obs = ConcatDataset([
-        ObsDataset(
-            data_folder=config["datasets"]["data"]["data_folder"],
-            data_split_folder=config["datasets"]["data"]["train"],
-            dataset_name="data",
-            image_size=config["image_size"],
-            len_traj_pred=config["len_traj_pred"],
-            context_size=config["context_size"],
-            obs_type=config["obs_type"],
-            use_generated_attnmaps=False, # Selector training uses GT only
-            generated_attnmaps_path=None,
-        )
-    ])
-    test_dataset_obs = ConcatDataset([
-        ObsDataset(
-            data_folder=config["datasets"]["data"]["data_folder"],
-            data_split_folder=config["datasets"]["data"]["test"],
-            dataset_name="data",
-            image_size=config["image_size"],
-            len_traj_pred=config["len_traj_pred"],
-            context_size=config["context_size"],
-            obs_type=config["obs_type"],
-            use_generated_attnmaps=False, # Selector training uses GT only
-            generated_attnmaps_path=None,
-        )
-    ])
-
-    train_loader_obs = DataLoader(
-        train_dataset_obs,
-        batch_size=config.get("batch_size_obs_model", config["batch_size"]), # Use specific, fall back to general
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2,
-        collate_fn=obs_person_collate_fn # WinnerSelector needs obs_person_collate_fn
-    )
-    test_loader_obs = DataLoader(
-        test_dataset_obs,
-        batch_size=config.get("batch_size_obs_model", config["batch_size"]), # Use specific, fall back to general
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2,
-        collate_fn=obs_person_collate_fn # WinnerSelector needs obs_person_collate_fn
-    )
-
-
-    # For other methods, or Stage 2/3 of "phase", we might need different collate_fns
-    train_dataset_act = ConcatDataset([
-        ActDataset(
-            data_folder=config["datasets"]["data"]["data_folder"],
-            data_split_folder=config["datasets"]["data"]["train"],
-            dataset_name="data",
-            image_size=config["image_size"],
-            len_traj_pred=config["len_traj_pred"],
-            context_size=config["context_size"],
-            obs_type=config["obs_type"],
-            use_generated_labels=False, # Default, will be overridden for phase Stage 2/3
-            generated_labels_path=None, # Default, will be overridden for phase Stage 2/3
-        )
-    ])
-    test_dataset_act = ConcatDataset([
-        ActDataset(
-            data_folder=config["datasets"]["data"]["data_folder"],
-            data_split_folder=config["datasets"]["data"]["test"],
-            dataset_name="data",
-            image_size=config["image_size"],
-            len_traj_pred=config["len_traj_pred"],
-            context_size=config["context_size"],
-            obs_type=config["obs_type"],
-            use_generated_labels=False, # Default, will be overridden for phase Stage 2/3
-            generated_labels_path=None, # Default, will be overridden for phase Stage 2/3
-        )
-    ])
-
-    # Determine the collate_fn for the action model based on its method type
-    if config["method"] in ["personaux", "personchannel", "persontoken", "phase"]: # These use person_collate_fn
-        act_collate_fn = act_person_collate_fn
-    else: # Default for base, cnnaux, gazeaux, gazechannel, gazetoken
-        act_collate_fn = act_base_collate_fn
-
-    train_loader_act = DataLoader(
-        train_dataset_act,
-        batch_size=config.get("batch_size_act_model", config["batch_size"]), # Use specific, fall back to general
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2,
-        collate_fn=act_collate_fn
-    )
-    test_loader_act = DataLoader(
-        test_dataset_act,
-        batch_size=config.get("batch_size_act_model", config["batch_size"]), # Use specific, fall back to general
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2,
-        collate_fn=act_collate_fn
-    )
-    
-
-    # Initialize models
-    if config["method"] == "phase":
-        act_model, act_optimizer, act_scheduler = create_model_and_optimizer("persontoken", config, device, float(config["lr"]), model_type="act_model") # Phase Stage 2/3 uses persontoken
-        obs_model = None
-    elif config["method"] == "dumobs" or config["method"] == "obs":
-        obs_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["lr"]), model_type="obs_model")
-        act_model = None # Only obs_model is primary
-    else: # All other single-stage methods train an action model
-        act_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["lr"]), model_type="act_model")
-        obs_model = None # Only act_model is primary
-
-
     current_epoch = 0
-    # Load checkpoint logic adapted for multi-model setup
-    if "load_run" in config:
-        load_run_folder = os.path.join("my_logs", config["load_run"])
-        print("Loading model from ", load_run_folder)
 
-        # Try to load obs_model if it exists and is needed
-        if obs_model is not None:
-            obs_best_path = os.path.join(load_run_folder, "best_obs_model.pth")
-            if os.path.exists(obs_best_path):
-                print(f"Loading obs_model from {obs_best_path}")
-                obs_checkpoint = torch.load(obs_best_path, map_location=device)
-                load_model(obs_model, obs_checkpoint)
-                if obs_optimizer and "optimizer_state_dict" in obs_checkpoint:
-                    obs_optimizer.load_state_dict(obs_checkpoint["optimizer_state_dict"])
-                if obs_scheduler and "scheduler_state_dict" in obs_checkpoint:
-                    obs_scheduler.load_state_dict(obs_checkpoint["scheduler_state_dict"])
-                # Note: For multi-stage, current_epoch might be better managed by the stage logic itself
-                # For simplicity here, we'll let the loop in train_eval_loop manage its own current_epoch
-                # current_epoch = max(current_epoch, obs_checkpoint.get("epoch", 0) + 1) # Keep track of max epoch to resume from
+    print(f"\n--- Starting for method: {config['method']} ---")
 
-        # Try to load act_model if it exists and is needed
-        if act_model is not None:
-            act_best_path = os.path.join(load_run_folder, "best_act.pth")
-            if os.path.exists(act_best_path):
-                print(f"Loading act_model from {act_best_path}")
-                act_checkpoint = torch.load(act_best_path, map_location=device)
+    if config["method"] in ["1phase", "1phaseplus", "gaze", "gazeplus"]:
+
+        use_generated_attnmaps = False if config["method"] in ["1phase", "gaze"] else True
+        train_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "/home/yzc/CRUEL/data_splits/train/attnmap_used.pt"
+        test_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "/home/yzc/CRUEL/data_splits/test/attnmap_used.pt"
+
+        # Create datasets for obs_model training
+        train_dataset_obs = ConcatDataset([
+            ObsDataset(
+                data_folder=config["datasets"]["data"]["data_folder"],
+                data_split_folder=config["datasets"]["data"]["train"],
+                dataset_name="data",
+                image_size=config["image_size"],
+                len_traj_pred=config["len_traj_pred"],
+                context_size=config["context_size"],
+                obs_type=config["obs_type"],
+                use_generated_attnmaps=use_generated_attnmaps,
+                generated_attnmaps_path=train_gen_attnmaps_path
+            )
+        ])
+        test_dataset_obs = ConcatDataset([
+            ObsDataset(
+                data_folder=config["datasets"]["data"]["data_folder"],
+                data_split_folder=config["datasets"]["data"]["test"],
+                dataset_name="data",
+                image_size=config["image_size"],
+                len_traj_pred=config["len_traj_pred"],
+                context_size=config["context_size"],
+                obs_type=config["obs_type"],
+                use_generated_attnmaps=use_generated_attnmaps,
+                generated_attnmaps_path=test_gen_attnmaps_path
+            )
+        ])
+
+        # Determine the collate_fn for the action model based on its method type
+        if config["method"] in ["1phase","1phaseplus"]: # These use person_collate_fn
+            obs_collate_fn = obs_person_collate_fn
+        else: # Default for gaze or gazeplus or 2phase or plus
+            obs_collate_fn = obs_base_collate_fn
+
+        train_loader_obs = DataLoader(
+            train_dataset_obs,
+            batch_size=config.get("batch_size_obs_model", config["batch_size"]), # Use specific, fall back to general
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=obs_collate_fn # WinnerSelector needs obs_person_collate_fn
+        )
+        test_loader_obs = DataLoader(
+            test_dataset_obs,
+            batch_size=config.get("batch_size_obs_model", config["batch_size"]), # Use specific, fall back to general
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=obs_collate_fn # WinnerSelector needs obs_person_collate_fn
+        )
+        train_loader_use = train_loader_obs
+        test_loader_use = test_loader_obs
+        
+    else:
+        if config["wg_origin"]=="GT":
+            use_generated_labels = False
+            train_gen_labels_path = None
+            test_gen_labels_path = None
+        else:
+            use_generated_labels = True
+            train_gen_labels_path = f'/home/yzc/CRUEL/data_splits/train/{config["wg_origin"]}.pt'
+            test_gen_labels_path = f'/home/yzc/CRUEL/data_splits/test/{config["wg_origin"]}.pt'
+
+        # Create datasets for act_model training
+        train_dataset_act = ConcatDataset([
+            ActDataset(
+                data_folder=config["datasets"]["data"]["data_folder"],
+                data_split_folder=config["datasets"]["data"]["train"],
+                dataset_name="data",
+                image_size=config["image_size"],
+                len_traj_pred=config["len_traj_pred"],
+                context_size=config["context_size"],
+                obs_type=config["obs_type"],
+                use_generated_labels=use_generated_labels,
+                generated_labels_path=train_gen_labels_path
+            )
+        ])
+        test_dataset_act = ConcatDataset([
+            ActDataset(
+                data_folder=config["datasets"]["data"]["data_folder"],
+                data_split_folder=config["datasets"]["data"]["test"],
+                dataset_name="data",
+                image_size=config["image_size"],
+                len_traj_pred=config["len_traj_pred"],
+                context_size=config["context_size"],
+                obs_type=config["obs_type"],
+                use_generated_labels=use_generated_labels,
+                generated_labels_path=test_gen_labels_path
+            )
+        ])
+
+        # Determine the collate_fn for the action model based on its method type
+        if config["method"] in ["gnmpersonaux", "gnmpersonchannel", "personaux", "personchannel", "persontoken"]: # These use person_collate_fn
+            act_collate_fn = act_person_collate_fn
+        else: # Default for vint, cnnaux, gazeaux, gazechannel, gazetoken
+            act_collate_fn = act_base_collate_fn
+
+        train_loader_act = DataLoader(
+            train_dataset_act,
+            batch_size=config.get("batch_size_act_model", config["batch_size"]), # Use specific, fall back to general
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=act_collate_fn
+        )
+        test_loader_act = DataLoader(
+            test_dataset_act,
+            batch_size=config.get("batch_size_act_model", config["batch_size"]), # Use specific, fall back to general
+            shuffle=True,
+            num_workers=config["num_workers"],
+            drop_last=False,
+            persistent_workers=True,
+            pin_memory=True,
+            prefetch_factor=2,
+            collate_fn=act_collate_fn
+        )
+        train_loader_use = train_loader_act
+        test_loader_use = test_loader_act
+
+
+    # Generate Attention Map from stage0 or gazes/winners from stage1
+    if config["ifgenerate"] == True:
+
+        if config ["method"] == "persontoken":
+
+            act_model, _, _ = create_model_and_optimizer(
+                "persontoken", config, device, 0.0, model_type="act_model"
+            ) # lr设为0表示不训练
+            
+            #加载模型
+            load_act_model_path = config["load_act_model_path"]
+            if os.path.exists(load_act_model_path):
+                print(f"Loading act_model weights from: {load_act_model_path}...")
+                act_checkpoint = torch.load(load_act_model_path, map_location=device)
                 load_model(act_model, act_checkpoint)
-                if act_optimizer and "optimizer_state_dict" in act_checkpoint:
-                    act_optimizer.load_state_dict(act_checkpoint["optimizer_state_dict"])
-                if act_scheduler and "scheduler_state_dict" in act_checkpoint:
-                    act_scheduler.load_state_dict(act_checkpoint["scheduler_state_dict"])
-                # current_epoch = max(current_epoch, act_checkpoint.get("epoch", 0) + 1) # Keep track of max epoch to resume from
+                print("Act_model weights loaded successfully.")
+            else:
+                raise FileNotFoundError(f"Error: Pre-trained act_model not found at {load_act_model_path}.")
+            # 生成raw
+            generate_attnmap(act_model, train_loader_use, device, config["save_train_raw_path"])
+            generate_attnmap(act_model, test_loader_use, device, config["save_test_raw_path"])
+            
+        elif config["method"] in ["1phase", "1phaseplus"]:
 
+            obs_model, _, _ = create_model_and_optimizer(
+                config["method"], config, device, 0.0, model_type="obs_model"
+            ) # lr设为0表示不训练
+            
+            #加载模型
+            load_obs_model_path = config["load_obs_model_path"]
+            if os.path.exists(load_obs_model_path):
+                print(f"Loading obs_model weights from: {load_obs_model_path}...")
+                obs_checkpoint = torch.load(load_obs_model_path, map_location=device)
+                load_model(obs_model, obs_checkpoint)
+                print("Obs_model weights loaded successfully.")
+            else:
+                raise FileNotFoundError(f"Error: Pre-trained obs_model not found at {load_obs_model_path}.")
+            # 生成raw
+            generate_1phase_winners(config["method"], obs_model, train_loader_use, device, config["save_train_raw_path"])
+            generate_1phase_winners(config["method"], obs_model, test_loader_use, device, config["save_test_raw_path"])
+        
+        elif config["method"] in ["gaze", "gazeplus"]:
 
-    # Stage training logic
-    if config["method"] == "phase":
-        stage0_epochs = config["stage0_epochs"]
-        stage1_epochs = config["stage0_epochs"] + config["stage1_epochs"] 
-        stage2_epochs = config["stage0_epochs"] + config["stage1_epochs"] + config["stage2_epochs"]
-        # Stage 0: Train act_model Using GT winners
-        print("\n--- Starting Stage 0: Training Action Model (act_model) with GT winners")
-        stage0_training_config = {
-            "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 100),
-            "min_delta": config.get("min_delta", 1e-4)
-        }
+            obs_model, _, _ = create_model_and_optimizer(
+                config["method"], config, device, 0.0, model_type="obs_model"
+            ) # lr设为0表示不训练
+            
+            #加载模型
+            load_obs_model_path = config["load_obs_model_path"]
+            if os.path.exists(load_obs_model_path):
+                print(f"Loading obs_model weights from: {load_obs_model_path}...")
+                obs_checkpoint = torch.load(load_obs_model_path, map_location=device)
+                load_model(obs_model, obs_checkpoint)
+                print("Obs_model weights loaded successfully.")
+            else:
+                raise FileNotFoundError(f"Error: Pre-trained obs_model not found at {load_obs_model_path}.")
+            # 生成raw
+            generate_gaze(config["method"], obs_model, train_loader_use, device, config["save_train_raw_path"])
+            generate_gaze(config["method"], obs_model, test_loader_use, device, config["save_test_raw_path"])
+
+    # else train models
+    else:
+        # Initialize models
+        if config["method"] in ["gaze", "gazeplus", "1phase", "1phaseplus"]:
+            obs_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["obs_lr"]), model_type="obs_model")
+            act_model = None  # Only obs_model is primary
+            
+            # 加载预训练模型用于评估
+            if not config["iftrain"]:
+                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pt"
+                if os.path.exists(model_path):
+                    print(f"Loading pretrained obs_model from: {model_path}")
+                    checkpoint = torch.load(model_path, map_location=device)
+                    load_model(obs_model, checkpoint)
+                    print("Pretrained obs_model loaded successfully.")
+                else:
+                    raise FileNotFoundError(f"Pretrained model not found at {model_path}")
+        else:
+            act_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["act_lr"]), model_type="act_model")
+            obs_model = None  # Only act_model is primary
+            
+            # 加载预训练模型用于评估
+            if not config["iftrain"]:
+                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pth"
+                if os.path.exists(model_path):
+                    print(f"Loading pretrained act_model from: {model_path}")
+                    checkpoint = torch.load(model_path, map_location=device)
+                    load_model(act_model, checkpoint)
+                    print("Pretrained act_model loaded successfully.")
+                else:
+                    raise FileNotFoundError(f"Pretrained model not found at {model_path}")
+
         train_eval_loop(
-           train_method="persontoken", # Explicitly train persontoken model
-            training_config=stage0_training_config,
-            train_model=config["train"],
-            obs_model=None, # obs_model is not active as primary here, but its predictions are used via DataLoader
-            act_model=act_model, # Pass act_model as the primary target
-            optimizer=act_optimizer,
-            scheduler=act_scheduler,
-            train_loader=train_loader_act, # Use action model loaders, now updated with generated labels
-            test_loader=test_loader_act,
-            transform=transform,
-            epochs=stage0_epochs,
-            device=device,
-            run_folder=config["run_folder"],
-            wandb_log_freq=config["wandb_log_freq"],
-            print_log_freq=config["print_log_freq"],
-            image_log_freq=config["image_log_freq"],
-            num_images_log=config["num_images_log"],
-            current_epoch=0,  # Stage 0 从0开始
-            use_wandb=config["use_wandb"],
-            eval_fraction=config["eval_fraction"],
-        )
-        print("--- Stage 0 Finished ---") 
-
-        # After Stage 0, generate attention_maps with the trained act_model
-        print("\n--- Generating Attention Maps for Stage 1 ---")
-        train_attention_maps = generate_attnmap(act_model, train_loader_act, device)
-        test_attention_maps = generate_attnmap(act_model, test_loader_act, device)
-
-        for dataset in train_dataset_obs.datasets: # Iterate through individual datasets if ConcatDataset
-            dataset.use_generated_attnmaps = True
-            dataset.set_generated_attention_maps(train_attention_maps)
-        for dataset in test_dataset_obs.datasets:
-            dataset.use_generated_attnmaps = True
-            dataset.set_generated_attention_maps(test_attention_maps)
-        
-        print("Generated attention maps have been loaded into dataset for Stage 1.")
-
-        # Stage 1: Train WinnerSelector (obs_model)
-        obs_model, obs_optimizer, obs_scheduler = create_model_and_optimizer("obs", config, device, float(config["lr"]), model_type="obs_model")
-        print("\n--- Starting Stage 1: Training WinnerSelector (obs_model) ---")
-        stage1_training_config = {
-            "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 20),
-            "min_delta": config.get("min_delta", 1e-4)
-        }
-        train_eval_loop(
-            train_method="obs", # Explicitly train obs model
-            training_config=stage1_training_config,
-            train_model=config["train"],
-            obs_model=obs_model, # Pass obs_model as the primary target
-            act_model=None, # act_model is not active in this stage
-            optimizer=obs_optimizer,
-            scheduler=obs_scheduler,
-            train_loader=train_loader_obs,
-            test_loader=test_loader_obs,
-            transform=transform,
-            epochs=stage1_epochs, # Use stage-specific epochs
-            device=device,
-            run_folder=config["run_folder"],
-            wandb_log_freq=config["wandb_log_freq"],
-            print_log_freq=config["print_log_freq"],
-            image_log_freq=config["image_log_freq"],
-            num_images_log=config["num_images_log"],
-            current_epoch=stage0_epochs,  # 从 stage0 结束的轮次开始
-            use_wandb=config["use_wandb"],
-            eval_fraction=config["eval_fraction"],
-        )
-        print("--- Stage 1 Finished ---")
-
-        # After Stage 1, generate predictions with the trained obs_model
-        print("\n--- Generating Selector Predictions for Stage 2 ---")
-        train_predicted_labels = generate_selector_predictions(obs_model, train_loader_obs, device)
-        test_predicted_labels = generate_selector_predictions(obs_model, test_loader_obs, device)
-        
-        # Assign generated labels to the act_model's datasets
-        # This assumes gaze_dataset has a method to set generated labels
-        # This will modify the underlying datasets used by train_loader_act and test_loader_act
-        for dataset in train_dataset_act.datasets: # Iterate through individual datasets if ConcatDataset
-            dataset.use_generated_labels = True
-            dataset.set_generated_labels(train_predicted_labels)
-        for dataset in test_dataset_act.datasets:
-            dataset.use_generated_labels = True
-            dataset.set_generated_labels(test_predicted_labels)
-
-        print("Generated selector predictions have been loaded into datasets for Stage 2.")
-
-        # Re-initialize optimizer and scheduler for the action model (optional, but good practice for distinct stages)
-        # Assuming we want a fresh start for act_model training
-        _ , act_optimizer, act_scheduler = create_model_and_optimizer(
-            "persontoken", config, device, float(config["lr"]), 
-            model_type="act_model", 
-            model_instance=act_model
-        )
-        print("\n--- Starting Stage 2: Training Action Model (act_model) with Selector Predictions ---")
-        stage2_training_config = {
-            "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 100),
-            "min_delta": config.get("min_delta", 1e-4)
-        }
-        stage1_epochs = config.get("stage1_epochs", 50)
-        train_eval_loop(
-            train_method="persontoken", # Explicitly train persontoken model
-            training_config=stage2_training_config,
-            train_model=config["train"],
-            obs_model=None, # obs_model is not active as primary here, but its predictions are used via DataLoader
-            act_model=act_model, # Pass act_model as the primary target
-            optimizer=act_optimizer,
-            scheduler=act_scheduler,
-            train_loader=train_loader_act, # Use action model loaders, now updated with generated labels
-            test_loader=test_loader_act,
-            transform=transform,
-            epochs=stage2_epochs,
-            device=device,
-            run_folder=config["run_folder"],
-            wandb_log_freq=config["wandb_log_freq"],
-            print_log_freq=config["print_log_freq"],
-            image_log_freq=config["image_log_freq"],
-            num_images_log=config["num_images_log"],
-            current_epoch=stage1_epochs,  # 从 stage0 + stage1 结束的轮次开始
-            use_wandb=config["use_wandb"],
-            eval_fraction=config["eval_fraction"],
-        )
-        print("--- Stage 2 Finished ---")
-        
-        # If there's a Stage 3, you would repeat a similar pattern here:
-        # Re-initialize optimizer/scheduler for stage 3 if needed
-        # Call train_eval_loop with appropriate parameters for Stage 3
-
-    else: # For all non-"phase" methods, single-stage training
-        print(f"\n--- Starting Single Stage Training for method: {config['method']} ---")
-        single_stage_training_config = {
-            "early_stopping": config.get("early_stopping", True),
-            "patience": config.get("patience", 200),
-            "min_delta": config.get("min_delta", 1e-4)
-        }
-        
-        # Determine which model is the primary for this single-stage run
-        primary_train_method = config["method"]
-        train_loader_use = train_loader_obs if config["method"] == "dumobs" or config["method"] == "obs" else train_loader_act
-        test_loader_use = test_loader_obs if config["method"] == "dumobs" or config["method"] == "obs" else test_loader_act
-        
-        train_eval_loop(
-            train_method=primary_train_method,
-            training_config=single_stage_training_config,
-            train_model=config["train"],
-            obs_model=obs_model if config["method"] == "dumobs" or config ["method"] == "obs" else None, # Pass actual obs_model if needed
-            act_model=act_model if config["method"] != "dumobs" or config ["method"] == "obs" else None, # Pass actual act_model if needed
+            train_method=config["method"],
+            training_config=config,
+            train_model=config["iftrain"],
+            obs_model=obs_model if config["method"] in ["1phase", "1phaseplus", "gaze", "gazeplus"] else None,
+            act_model=act_model if config["method"] not in ["1phase", "1phaseplus", "gaze", "gazeplus"] else None,
             optimizer=optimizer, # Use the single optimizer
             scheduler=scheduler, # Use the single scheduler
             train_loader=train_loader_use,
@@ -664,28 +773,17 @@ def main(config):
             use_wandb=config["use_wandb"],
             eval_fraction=config["eval_fraction"],
         )
-        print(f"--- Single Stage Training for {config['method']} Finished ---")
+        print(f"--- {config['method']} Finished ---")
 
-
-    print("FINISHED TRAINING")
-    wandb.finish()
+        wandb.finish()
 
 
 if __name__ == "__main__":
-
-    # 如果没有指定 load_run，则更新 run_name 和 run_folder，否则使用旧的
-    if "load_run" not in config:
-        config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
-        config["run_folder"] = os.path.join(
-            "my_logs", config["project_name"], config["run_name"]
-        )
-        os.makedirs(config["run_folder"])  # 新建目录
-    else:
-        # 使用 load_run 对应的文件夹
-        # 假设 config["load_run"] 的格式为 "my_vint/vint_2025_02_21_00_19_42"
-        config["run_folder"] = os.path.join("my_logs", config["load_run"])
-        print("Continuing from:", config["run_folder"])
-        # 此时不要创建新文件夹
+    config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
+    config["run_folder"] = os.path.join(
+        "my_logs", config["project_name"], config["run_name"]
+    )
+    os.makedirs(config["run_folder"])
 
     if config["use_wandb"]:
         wandb.login()
@@ -702,7 +800,7 @@ if __name__ == "__main__":
             wandb.config.update(config, allow_val_change=True)
         else:
             wandb.init(
-                #mode="offline",
+                mode="offline",
                 project=config["project_name"],
                 settings=wandb.Settings(start_method="fork"),
                 entity="polluxiaga-nanjing-university",
@@ -710,5 +808,4 @@ if __name__ == "__main__":
             wandb.run.name = config["run_name"]
             wandb.config.update(config)
 
-    print(config)
     main(config)

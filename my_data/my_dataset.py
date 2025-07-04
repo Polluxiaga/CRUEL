@@ -66,7 +66,7 @@ class BaseDataset(Dataset):
         self.fixations_cache = {}
         self.person_ids_cache = {}
         self.select_ids_cache = {} # This will store the select_ids for winner_labels
-
+        
         self._load_index() # Load or build samples_index and goals_index
         
         # Use cache path as unique key for tracking built status
@@ -302,12 +302,14 @@ class BaseDataset(Dataset):
             print(f"Failed to load mask for person {person_id} in {trajectory_name} at time {time} from cache: {e}")
             return dummy_mask
 
-
     def _load_fixations(self, trajectory_name, curr_time):
         """
-        Load fixation data and create a Gaussian attention map
+        Load fixation data for the given trajectory and time
+        Args:
+            trajectory_name (str): Name of the trajectory
+            curr_time (int): Current time index
         Returns:
-            torch.Tensor: Gaussian attention map of shape (1, H, W)
+            list: List of tuples containing (x,y) fixation coordinates
         """
         if trajectory_name not in self.fixations_cache:
             with open(os.path.join(self.data_folder, trajectory_name, "fixations.pkl"), "rb") as f:
@@ -315,9 +317,6 @@ class BaseDataset(Dataset):
             self.fixations_cache[trajectory_name] = fixations_data
             
         fixations_df = self.fixations_cache[trajectory_name]
-        
-        W, H = self.image_size
-        dummy_attention_map = torch.zeros((1, H, W), dtype=torch.float32)
 
         try:
             fx, fy = 0, 0 
@@ -352,20 +351,33 @@ class BaseDataset(Dataset):
                             found_fixation = True
                             break
                 
-                # If still (0,0) after searching, return dummy map
+                # If still (0,0) after searching, return empty list
                 if not found_fixation:
-                    print(f"No non-(0,0) fixations found for {trajectory_name} around time {curr_time}. Returning dummy map.")
-                    return dummy_attention_map
+                    print(f"No non-(0,0) fixations found for {trajectory_name} around time {curr_time}. Returning empty list.")
+                    return []
             
-            fixations = [(fx, fy)] 
+            return [(fx, fy)]
 
-        except IndexError: # 确保处理超出索引的情况
-            print(f"Error loading fixations for {trajectory_name} at time {curr_time}: Index out of bounds. Returning dummy map.")
-            return dummy_attention_map
+        except IndexError:
+            print(f"Error loading fixations for {trajectory_name} at time {curr_time}: Index out of bounds. Returning empty list.")
+            return []
         except Exception as e:
-            print(f"Error loading fixations for {trajectory_name} at time {curr_time}: {e}. Returning dummy map.")
-            return dummy_attention_map
+            print(f"Error loading fixations for {trajectory_name} at time {curr_time}: {e}. Returning empty list.")
+            return []
+
+    def _load_gazemaps(self, trajectory_name, curr_time):
+        """
+        Create a Gaussian attention map
+        Returns:
+            torch.Tensor: Gaussian attention map of shape (1, H, W)
+        """
+        W, H = self.image_size
+        dummy_attention_map = torch.zeros((1, H, W), dtype=torch.float32)
         
+        # Get fixation points from _load_fixations
+        fixations = self._load_fixations(trajectory_name, curr_time)
+        if not fixations:
+            return dummy_attention_map
         
         # Create empty attention map
         attention_map = torch.zeros((1, H, W), dtype=torch.float32)
@@ -394,7 +406,6 @@ class BaseDataset(Dataset):
             attention_map[0] = torch.maximum(attention_map[0], gaussian)
         
         return attention_map
-            
 
     def _get_trajectory(self, trajectory_name):
         if trajectory_name in self.trajectory_cache:
@@ -441,7 +452,7 @@ class ObsDataset(BaseDataset):
         context_size: int,
         obs_type: str = "image",
         use_generated_attnmaps: bool = False,
-        generated_attnmaps_path: Optional[str]=None,
+        generated_attnmaps_path: Optional[str] = None,
     ):
         super().__init__(data_folder, data_split_folder, dataset_name,
             image_size, len_traj_pred, context_size, obs_type)
@@ -465,27 +476,7 @@ class ObsDataset(BaseDataset):
                 self.use_generated_attnmaps = False # 加载失败则禁用
                 self._cached_generated_attnmaps = None
         elif self.use_generated_attnmaps and not generated_attnmaps_path:
-             print("Warning: use_generated_attnmaps is True but no generated_attnmaps_path provided. Labels will need to be set dynamically via set_generated_attnmaps().")
-
-
-    def set_generated_attention_maps(self, attention_maps_list: List[torch.Tensor]):
-        """
-        动态设置内存中的生成注意力图。
-        此列表应包含每个数据集样本一个的注意力图张量，
-        按原始样本索引进行索引。每个张量应为 (N * spatial_flatten_len) 形状。
-        """
-        if not isinstance(attention_maps_list, list):
-            raise TypeError("attention_maps_list 必须是 torch.Tensor 列表。")
-        # 确保注意力图列表的长度与数据集的样本总数匹配
-        if len(attention_maps_list) != len(self.samples_index):
-            raise ValueError(f"生成的注意力图长度 ({len(attention_maps_list)}) 必须与数据集长度 ({len(self.samples_index)}) 匹配。")
-        
-        if attention_maps_list and not all(p.ndim == 1 for p in attention_maps_list):
-            raise ValueError("All attention maps should be 1D tensors (flattened N*spatial_flatten_len).")
-
-        self._cached_generated_attention_maps = attention_maps_list
-        self.use_generated_attnmaps = True # 确保设置此标志
-        print(f"Dataset updated with {len(attention_maps_list)} in-memory generated attention maps.")
+             print("Warning: use_generated_attnmaps is True but no generated_attnmaps_path provided.")
 
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
@@ -498,6 +489,7 @@ class ObsDataset(BaseDataset):
 
         # Load images
         obs_images = torch.cat([self._load_image(traj_name, t) for t in context])
+        fixations = torch.stack([torch.tensor(self._load_fixations(traj_name, t)[0], dtype=torch.float32) for t in context])
 
         # Load person IDs, labels and masks
         person_ids, gt_winner_labels_list = self._load_persons(traj_name, curr_time)
@@ -525,16 +517,16 @@ class ObsDataset(BaseDataset):
         generated_attention_map_to_use = None
 
         if self.use_generated_attnmaps: # Check if flag is true
-            if self._cached_generated_attention_maps is not None:
+            if self._cached_generated_attnmaps is not None:
                 # 获取缓存中存储的注意力图 (N * spatial_flatten_len)
-                generated_attention_map_from_cache = self._cached_generated_attention_maps[i]
+                generated_attention_map_from_cache = self._cached_generated_attnmaps[i]
                 
                 if generated_attention_map_from_cache.ndim != 1:
                     print(f"Warning: Cached attention map for index {i} has unexpected dimensions: {generated_attention_map_from_cache.shape}. Expected 1D (N*spatial_flatten_len).")
 
                 generated_attention_map_to_use = generated_attention_map_from_cache
             else:
-                # 如果 use_generated_attnmaps 为 True 但 _cached_generated_attention_maps 为 None，
+                # 如果 use_generated_attnmaps 为 True 但 _cached_generated_attnmaps 为 None，
                 # 说明加载失败或未设置，此时应返回一个指示，或者一个全零/占位符。
                 # 返回 None 让 collate_fn 处理，或者根据需要返回一个零张量。
                 print(f"Warning: Generated attention map for index {i} not found in cache despite use_generated_attnmaps being True. Returning None.")
@@ -545,6 +537,7 @@ class ObsDataset(BaseDataset):
         # Return order for ObsModel: obs_images, person_masks, winner_labels, invalid_flags, original_index, generated_attention_map
         return (
             obs_images,
+            fixations,
             person_masks,
             generated_attention_map_to_use,
             winner_labels_to_return, # GT winner labels
@@ -572,42 +565,47 @@ class ActDataset(BaseDataset):
         )
 
         self.use_generated_labels = use_generated_labels
-        self._cached_generated_labels = None
+        self._cached_generated_winner_labels = None
+        self._cached_generated_gaze_maps_individual = None
+
+        self.generated_type = None  # winner_labels or gaze_maps
 
         # 尝试从磁盘加载生成标签，如果 use_generated_labels 为 True 且提供了路径
         if self.use_generated_labels and generated_labels_path and os.path.exists(generated_labels_path):
             print(f"Loading generated labels from disk: {generated_labels_path}...")
             try:
-                loaded_preds_list = torch.load(generated_labels_path)
-                if not isinstance(loaded_preds_list, list) or not all(isinstance(p, torch.Tensor) for p in loaded_preds_list):
-                     raise TypeError("Generated labels file should contain a list of tensors.")
-                
-                # 存储为列表，通过索引访问
-                self._cached_generated_labels = loaded_preds_list
-                print(f"Loaded {len(self._cached_generated_labels)} generated label samples from disk.")
+                loaded_data = torch.load(generated_labels_path)
+                # 判断加载的数据类型
+                if "phase" in generated_labels_path:
+                    # 加载的是 winner_labels
+                    if not isinstance(loaded_data, list) or not all(isinstance(p, torch.Tensor) for p in loaded_data):
+                        raise TypeError("Generated winner labels file should contain a list of tensors.")
+                    self._cached_generated_winner_labels = loaded_data
+                    self.generated_labels_type = "winner_labels"
+                    print(f"Loaded {len(self._cached_generated_winner_labels)} generated winner label samples from disk.")
+                    
+                elif "gaze" in generated_labels_path:
+                    # 加载的是 gaze_maps
+                    if not isinstance(loaded_data, dict) or not all(isinstance(k, tuple) and isinstance(v, torch.Tensor) for k, v in loaded_data.items()):
+                        raise TypeError("Generated gaze maps file should contain a list of tensors.")
+                    self._cached_generated_gaze_maps_individual = loaded_data
+                    self.generated_labels_type = "gaze_maps"
+                    print(f"Loaded {len(self._cached_generated_gaze_maps_individual)} generated gaze map samples from disk.")
+                else:
+                    # 路径中不包含 "phase" 也不包含 "gaze"，无法判断类型
+                    print(f"Warning: generated_labels_path '{generated_labels_path}' does not contain 'phase' or 'gaze'. Unable to determine type of generated labels. Proceeding without them.")
+                    self.use_generated_labels = False # 禁用生成标签
+                    self._cached_generated_winner_labels = None
+                    self._cached_generated_gaze_maps_individual = None
+
             except Exception as e:
                 print(f"Warning: Failed to load generated labels from {generated_labels_path}: {e}. Proceeding without them.")
                 self.use_generated_labels = False # 加载失败则禁用
-                self._cached_generated_labels = None
+                self._cached_generated_winner_labels = None
+                self._cached_generated_gaze_maps_individual = None
         elif self.use_generated_labels and not generated_labels_path:
-             print("Warning: use_generated_labels is True but no generated_labels_path provided. Labels will need to be set dynamically via set_generated_labels().")
-
-
-    def set_generated_labels(self, labels_list: List[torch.Tensor]):
-        """
-        动态设置内存中的生成选择器标签。
-        此列表应包含未经填充的布尔张量，每个数据集样本一个，
-        按原始样本索引进行索引。
-        """
-        if not isinstance(labels_list, list):
-            raise TypeError("labels_list 必须是 torch.Tensor 列表。")
-        # 确保标签列表的长度与数据集的样本总数匹配
-        if len(labels_list) != len(self.samples_index):
-            raise ValueError(f"生成的标签长度 ({len(labels_list)}) 必须与数据集长度 ({len(self.samples_index)}) 匹配。")
-
-        self._cached_generated_labels = labels_list
-        self.use_generated_labels = True # 确保设置此标志
-        print(f"Dataset updated with {len(labels_list)} in-memory generated labels.")
+             print("Warning: use_generated_labels is True but no generated_labels_path provided.")
+             self.use_generated_labels = False
     
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
@@ -616,7 +614,31 @@ class ActDataset(BaseDataset):
 
         # Load images and gaze data
         obs_images = torch.cat([self._load_image(traj_name, t) for t in context])
-        gaze_maps = torch.cat([self._load_fixations(traj_name, t) for t in context])
+
+        # Determine which gaze maps to return: GT or generated
+        gaze_maps_to_return = None
+        if self.use_generated_labels and self.generated_labels_type == "gaze_maps":
+            if self._cached_generated_gaze_maps_individual is not None:
+                extracted_gaze_maps_list: List[torch.Tensor] = []
+                for t in context:
+                    # 从缓存的字典中获取单个预测的 gaze map
+                    key = (traj_name, t)
+                    predicted_gaze_map_for_frame = self._cached_generated_gaze_maps_individual.get(key)
+                    
+                    if predicted_gaze_map_for_frame is not None:
+                        extracted_gaze_maps_list.append(predicted_gaze_map_for_frame.unsqueeze(0)) # 确保形状是 (1, H, W)
+                    else:
+                        print(f"ActDataset Warning: Individual predicted gaze map for {key} not found in cache. Using GT gaze map.")
+                        extracted_gaze_maps_list.append(self._load_gazemaps(traj_name, t))
+                
+                # 将所有获取到的 gaze maps 拼接起来形成上下文序列
+                gaze_maps_to_return = torch.cat(extracted_gaze_maps_list, dim=0) # 结果形状 (context_size + 1, H, W)
+            else:
+                print(f"Error: Generated gaze maps for index {i} not found in cache. Returning GT gaze maps.")
+                gaze_maps_to_return = torch.cat([self._load_gazemaps(traj_name, t) for t in context])
+        else:
+            # 使用 GT gaze maps
+            gaze_maps_to_return = torch.cat([self._load_gazemaps(traj_name, t) for t in context])
 
         # Load person IDs, labels and masks
         person_ids, gt_winner_labels_list = self._load_persons(traj_name, curr_time)
@@ -638,10 +660,10 @@ class ActDataset(BaseDataset):
 
             # Determine which winner_labels to return: GT or generated
             winner_labels_to_return = None
-            if self.use_generated_labels:
-                if self.use_generated_labels and self._cached_generated_labels is not None:
+            if self.use_generated_labels and self.generated_labels_type == "winner_labels":
+                if self.use_generated_labels and self._cached_generated_winner_labels is not None:
                     # 获取缓存中存储的原始未填充预测标签 (P_actual,)
-                    generated_labels_from_cache = self._cached_generated_labels[i]
+                    generated_labels_from_cache = self._cached_generated_winner_labels[i]
                 
                     # 检查加载的预测标签长度是否与当前样本的实际人数匹配
                     if generated_labels_from_cache.shape[0] != len(person_ids):
@@ -668,7 +690,7 @@ class ActDataset(BaseDataset):
         
         return (
             torch.as_tensor(obs_images, dtype=torch.float32),
-            torch.as_tensor(gaze_maps, dtype=torch.float32),
+            torch.as_tensor(gaze_maps_to_return, dtype=torch.float32),
             torch.as_tensor(person_masks, dtype=torch.bool),
             torch.as_tensor(winner_labels_to_return, dtype=torch.bool),
             torch.as_tensor(actions, dtype=torch.float32),

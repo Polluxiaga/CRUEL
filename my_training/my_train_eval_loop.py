@@ -3,18 +3,7 @@ import os
 from typing import Optional, Dict 
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import (
-    base_train, base_evaluate,
-    cnnaux_train, cnnaux_evaluate,
-    gazeaux_train, gazeaux_evaluate,
-    personaux_train, personaux_evaluate,
-    gazechannel_train, gazechannel_evaluate,
-    personchannel_train, personchannel_evaluate,
-    gazetoken_train, gazetoken_evaluate,
-    persontoken_train, persontoken_evaluate,
-    dumobs_train, dumobs_evaluate,
-    obs_train, obs_evaluate
-)
+from my_training.my_train_utils import *
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -83,11 +72,23 @@ def train_eval_loop(
     """
 
     # Determine which model is the primary target for *this specific* train_eval_loop call
-    if train_method == "obs" or train_method == "dumobs":
+    if train_method == "1phase":
         primary_model = obs_model
         # Use a specific path for obs_model best checkpoint
-        best_model_path = os.path.join(run_folder, "best_obs_model.pth")
-        latest_path = os.path.join(run_folder, "latest_obs.pth")
+        best_model_path = os.path.join(run_folder, "best_1phase_model.pth")
+        latest_path = os.path.join(run_folder, "latest_1phase.pth")
+    elif train_method == "1phaseplus":
+        primary_model = obs_model
+        best_model_path = os.path.join(run_folder, "best_1phaseplus_model.pth")
+        latest_path = os.path.join(run_folder, "latest_1phaseplus.pth")
+    elif train_method == "gaze":
+        primary_model = obs_model
+        best_model_path = os.path.join(run_folder, "best_gaze_model.pth")
+        latest_path = os.path.join(run_folder, "latest_gaze.pth")
+    elif train_method == "gazeplus":
+        primary_model = obs_model
+        best_model_path = os.path.join(run_folder, "best_gazeplus_model.pth")
+        latest_path = os.path.join(run_folder, "latest_gazeplus.pth")
     else: # All other methods train the act_model
         primary_model = act_model
         # Use a specific path for act_model best checkpoint
@@ -99,308 +100,106 @@ def train_eval_loop(
     
     primary_model = primary_model.to(device)
 
-    best_test_loss = float('inf')
+    if training_config["method"] not in ["1phase", "1phaseplus"]:
+        best_test_loss = float('inf')  # 对于普通的loss，初始化为正无穷
+    else:
+        best_test_loss = float('-inf')  # 对于AUC-PR指标，初始化为负无穷
+    
     best_epoch = 0
     epochs_without_improvement = 0
 
 
     for epoch in range(current_epoch, epochs):
         if train_model:
-            if train_method == "base":
-                base_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "cnnaux":
-                cnnaux_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "gazeaux":
-                gazeaux_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "personaux":
-                personaux_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "gazechannel":
-                gazechannel_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "personchannel":
-                personchannel_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "gazetoken":
-                gazetoken_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "persontoken":
-                persontoken_train(
-                    model=act_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "dumobs":
-                dumobs_train(
-                    model=obs_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
-            elif train_method == "obs":
-                obs_train(
-                    model=obs_model,
-                    optimizer=optimizer,
-                    dataloader=train_loader,
-                    transform=transform,
-                    device=device,
-                    run_folder=run_folder,
-                    epoch=epoch,
-                    print_log_freq=print_log_freq,
-                    wandb_log_freq=wandb_log_freq,
-                    image_log_freq=image_log_freq,
-                    num_images_log=num_images_log,
-                    use_wandb=use_wandb,
-                )
+            # Get the training function dynamically based on train_method
+            train_func = globals().get(f"{train_method}_train")
+            if train_func is None:
+                raise ValueError(f"Unknown train_method: {train_method}")
+                
+            # Determine which model to use
+            model = obs_model if train_method in ["gaze", "gazeplus", "1phase", "1phaseplus"] else act_model
+                
+            # Call the training function
+            train_func(
+                model=model,
+                optimizer=optimizer,
+                dataloader=train_loader,
+                transform=transform,
+                device=device,
+                run_folder=run_folder,
+                epoch=epoch,
+                print_log_freq=print_log_freq,
+                wandb_log_freq=wandb_log_freq,
+                image_log_freq=image_log_freq,
+                num_images_log=num_images_log,
+                use_wandb=use_wandb,
+            )
 
         # Evaluation
         test_loss = None
-        if train_method == "base":
-            test_loss = base_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "cnnaux":
-            test_loss = cnnaux_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "gazeaux":
-            test_loss = gazeaux_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "personaux":
-            test_loss = personaux_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "gazechannel":
-            test_loss = gazechannel_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "personchannel":
-            test_loss = personchannel_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "gazetoken":
-            test_loss = gazetoken_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "persontoken":
-            test_loss = persontoken_evaluate(
-                model=act_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "dumobs":
-            test_loss = dumobs_evaluate(
-                model=obs_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
-        elif train_method == "obs":
-            test_loss = obs_evaluate(
-                model=obs_model,
-                dataloader=test_loader,
-                transform=transform,
-                device=device,
-                run_folder=run_folder,
-                epoch=epoch,
-                num_images_log=num_images_log,
-                use_wandb=use_wandb,
-                eval_fraction=eval_fraction,
-            )
+        # Get the evaluation function dynamically based on train_method
+        eval_func = globals().get(f"{train_method}_evaluate")
+        if eval_func is None:
+            raise ValueError(f"Unknown evaluation method for {train_method}")
+        
+        # Determine which model to use for evaluation
+        model = obs_model if train_method in ["gaze", "gazeplus", "1phase", "1phaseplus"] else act_model
+        
+        # Call the evaluation function
+        test_loss = eval_func(
+            model=model,
+            dataloader=test_loader,
+            transform=transform,
+            device=device,
+            run_folder=run_folder,
+            epoch=epoch,
+            num_images_log=num_images_log,
+            use_wandb=use_wandb,
+            eval_fraction=eval_fraction,
+        )
 
         # Early stopping check
         if training_config.get("early_stopping", False) and test_loss is not None:
-            if test_loss < best_test_loss - training_config.get("min_delta", 1e-4):
-                # 有显著改善
-                best_test_loss = test_loss
-                best_epoch = epoch
-                epochs_without_improvement = 0
+            if training_config["method"] not in ["1phase", "1phaseplus"]:
+                if test_loss < best_test_loss - training_config.get("min_delta", 1e-4):
+                    # 有显著改善
+                    best_test_loss = test_loss
+                    best_epoch = epoch
+                    epochs_without_improvement = 0
 
-                # Save best model
-                checkpoint = {
-                    "epoch": epoch,
-                    "model_state_dict": primary_model.state_dict(), # Correctly save state_dict
-                    "optimizer_state_dict": optimizer.state_dict(), # Correctly save state_dict
-                    "test_loss": test_loss,
-                    "scheduler_state_dict": scheduler.state_dict() if scheduler else None, # Correctly save state_dict
-                    "training_config": training_config # Save the early stopping config
-                }
-                torch.save(checkpoint, best_model_path)
-                print(f"Saved best model ({os.path.basename(best_model_path)}) with test_loss {test_loss:.4f} at epoch {epoch}")
+                    # Save best model
+                    checkpoint = {
+                        "epoch": epoch,
+                        "model_state_dict": primary_model.state_dict(), # Correctly save state_dict
+                        "optimizer_state_dict": optimizer.state_dict(), # Correctly save state_dict
+                        "test_loss": test_loss,
+                        "scheduler_state_dict": scheduler.state_dict() if scheduler else None, # Correctly save state_dict
+                        "training_config": training_config # Save the early stopping config
+                    }
+                    torch.save(checkpoint, best_model_path)
+                    print(f"Saved best model ({os.path.basename(best_model_path)}) with test_loss {test_loss:.4f} at epoch {epoch}")
+                else:
+                    epochs_without_improvement += 1
             else:
-                epochs_without_improvement += 1
+                if test_loss > best_test_loss + training_config.get("min_delta", 1e-4):
+                    # 有显著改善
+                    best_test_loss = test_loss
+                    best_epoch = epoch
+                    epochs_without_improvement = 0
+
+                    # Save best model
+                    checkpoint = {
+                        "epoch": epoch,
+                        "model_state_dict": primary_model.state_dict(), # Correctly save state_dict
+                        "optimizer_state_dict": optimizer.state_dict(), # Correctly save state_dict
+                        "test_loss": test_loss,
+                        "scheduler_state_dict": scheduler.state_dict() if scheduler else None, # Correctly save state_dict
+                        "training_config": training_config # Save the early stopping config
+                    }
+                    torch.save(checkpoint, best_model_path)
+                    print(f"Saved best model ({os.path.basename(best_model_path)}) with AUC-PR {test_loss:.4f} at epoch {epoch}")
+                else:
+                    epochs_without_improvement += 1
 
             # Check if we should stop
             patience = training_config.get("patience", 10)
