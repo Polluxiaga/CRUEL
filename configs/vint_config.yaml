@@ -4,15 +4,15 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-gpu_id: 0
-use_wandb: False # set to false if you don't want to log to wandb
+gpu_id: 2
+use_wandb: True # set to false if you don't want to log to wandb
 wandb_log_freq: 220 # in iterations
 
 # for obs_method: gaze or gazeplus or 1phase or 1phaseplus
 # for act_method:vint or gazeaux or personaux or gazechannel or personchannel or gazefov or personfov or gazetoken or persontoken
 #                gnm or gnmgazeaux or gnmpersonaux or gnmgazechannel or gnmpersonchannel or gnmgazefov or gnmpersonfov
-method: "gnm" 
-wg_origin: "GT" #GT or gaze or gazeplus or 2phase or 2phaseplus or 1phase or 1phaseplus
+method: "vint" 
+wg_origin: "1phase" #GT or gaze or gazeplus or 2phase or 2phaseplus or 1phase or 1phaseplus
 
 iftrain: True
 ifgenerate: False
@@ -94,5 +94,5 @@ print_log_freq: 220 # in iterations
 image_log_freq: 220 # in iterations
 num_images_log: 3 #0 
 pairwise_test_freq: 0 # in epochs
-eval_fraction: 0.25
+eval_fraction: 1
 eval_freq: 1 # in epochs

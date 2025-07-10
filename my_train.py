@@ -84,7 +84,8 @@ def generate_attnmap(
                 select_labels,
                 _, # Unused (e.g., action_label)
                 invalid,
-                original_indices_batch
+                original_indices_batch,
+                _
             ) = batch_data
 
             # Move tensors to device

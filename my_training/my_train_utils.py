@@ -5,6 +5,7 @@ import tqdm
 import itertools
 from sklearn.metrics import precision_recall_curve, auc
 from typing import List, Dict, Optional, TextIO
+from collections import defaultdict
 from scipy.spatial.distance import directed_hausdorff
 from frechetdist import frdist
 
@@ -51,14 +52,14 @@ def act_base_collate_fn(batch):
     - gaze_maps: gaze attention maps
     - action_list: action labels
     """
-    obs_images, gaze_maps, _, _, action_list, original_idx_list = zip(*batch)
+    obs_images, gaze_maps, _, _, action_list, original_idx_list, traj_name_tuple = zip(*batch)
     
     obs_batch = torch.stack(obs_images, dim=0)
     gazemap_batch = torch.stack(gaze_maps, dim=0)
     action_batch = torch.stack(action_list, dim=0)
     original_idx_batch = torch.stack(original_idx_list, dim=0)
     
-    return obs_batch, gazemap_batch, action_batch, original_idx_batch
+    return obs_batch, gazemap_batch, action_batch, original_idx_batch, traj_name_tuple
 
 
 def obs_person_collate_fn(batch):
@@ -117,7 +118,7 @@ def act_person_collate_fn(batch):
     """
 
     # 1) 解包
-    obs_images, _, mask_list, select_list, action_list, original_idx_list = zip(*batch)
+    obs_images, _, mask_list, select_list, action_list, original_idx_list, traj_name_tuple = zip(*batch)
     B = len(batch)
 
     # 2) Stack obs_images and action_labels
@@ -150,7 +151,7 @@ def act_person_collate_fn(batch):
     select_batch = torch.stack(select_padded, dim=0)  # [B, P_max]
     invalid_flag = torch.stack(invalid, dim=0)     # [B, P_max]
 
-    return obs_batch, mask_batch, select_batch, action_batch, invalid_flag, original_idx_batch
+    return obs_batch, mask_batch, select_batch, action_batch, invalid_flag, original_idx_batch, traj_name_tuple
 
 
 class Logger:
@@ -390,6 +391,33 @@ def gnm_log(
             log_file.flush()
 
 
+def initialize_evaluation_loggers() -> Dict[str, Logger]:
+    """
+    Initializes and returns a dictionary of Logger objects for evaluation metrics,
+    including overall and categorized action losses.
+    """
+    loggers = {
+        "action_loss": Logger("action_loss", "test"), # Overall action loss
+        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
+        "fde": Logger("fde", "test"),
+        "frechet": Logger("frechet", "test"),
+        "hausdorff": Logger("hausdorff", "test"),
+    }
+
+    # Initialize categorized action_loss loggers using defaultdict for flexibility
+    categorized_action_loss_loggers: Dict[str, Logger] = defaultdict(
+        lambda: Logger("action_loss", "test")
+    )
+    # Pre-define common categories to ensure they appear even if no samples for that category
+    categorized_action_loss_loggers['f_type'] = Logger("action_loss_f_type", "test")
+    categorized_action_loss_loggers['s_type'] = Logger("action_loss_s_type", "test")
+    categorized_action_loss_loggers['x_type'] = Logger("action_loss_x_type", "test")
+
+    # Combine all loggers into one dictionary for easier passing
+    all_loggers = {**loggers, **categorized_action_loss_loggers}
+    return all_loggers
+
+
 def compute_baseloss(
     action_label: torch.Tensor,
     action_pred: torch.Tensor,
@@ -402,17 +430,18 @@ def compute_baseloss(
         # Reduce over non-batch dimensions to get loss per batch element
         while unreduced_loss.dim() > 1:
             unreduced_loss = unreduced_loss.mean(dim=-1)
-        return (unreduced_loss).mean()
+        return unreduced_loss
 
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
     
     # MSE Loss
-    action_loss = action_reduce(F.mse_loss(action_pred, action_label, reduction="none"))
+    action_loss = F.mse_loss(action_pred, action_label, reduction="none")
+    action_loss_per_sample = action_reduce(action_loss)
+    action_loss_scalar = action_loss_per_sample.mean()  # mean across the batch
 
     # cosine similarity
-    action_waypts_cos_similarity = action_reduce(F.cosine_similarity(
-        action_pred, action_label, dim=-1
-    ))
+    action_waypts_cos_similarity = F.cosine_similarity(action_pred, action_label, dim=-1)
+    action_waypts_cos_similarity_scalar = action_reduce(action_waypts_cos_similarity).mean()
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
@@ -440,8 +469,9 @@ def compute_baseloss(
         hausdorff_dists.append(hausdorff)
 
     results = {
-        "action_loss": action_loss,
-        "action_waypts_cos_sim": action_waypts_cos_similarity,
+        "action_loss": action_loss_scalar,
+        "action_loss_per_sample": action_loss_per_sample,
+        "action_waypts_cos_sim": action_waypts_cos_similarity_scalar,
         "fde": torch.tensor(fde.item(), device=action_label.device),
         "frechet": torch.tensor(np.mean(frechet_dists), device=action_label.device),
         "hausdorff": torch.tensor(np.mean(hausdorff_dists), device=action_label.device),
@@ -513,6 +543,7 @@ def gnm_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             _, # [batch_size, context_size+1, H, W] 
             action_label,
+            _,
             _
         ) = data
 
@@ -546,7 +577,7 @@ def gnm_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -582,13 +613,7 @@ def gnm_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -600,14 +625,14 @@ def gnm_evaluate(
         desc=f"Evaluating for epoch {epoch}",
     )
 
-    log_file_path = os.path.join(run_folder, "evaluation_log.log") # 评估日志文件名
+    log_file_path = os.path.join(run_folder, "gnm.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
     with open(log_file_path, 'a', encoding='utf-8') as f_log:
 
         with torch.no_grad():
             for i, data in enumerate(tqdm_iter):
-                obs_image, _, action_label, _ = data
+                obs_image, _, action_label, _, traj_names = data
 
                 obs_images = torch.split(obs_image, 3, dim=1)
                 obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
@@ -621,8 +646,31 @@ def gnm_evaluate(
                 # 计算损失并记录（注意：此处直接用 .item() 记录数值）
                 losses = compute_baseloss(action_label=action_label, action_pred=action_pred)
                 for key, value in losses.items():
-                    if key in loggers:
-                        loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+                action_loss_per_sample = losses["action_loss_per_sample"]
+
+                for sample_idx, traj_name in enumerate(traj_names):
+                    current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                    # Determine the category based on traj_name
+                    if '_f_' in traj_name:
+                        category_logger_name = 'f_type' # Use the simplified category name
+                    elif '_s_' in traj_name:
+                        category_logger_name = 's_type'
+                    elif '_x_' in traj_name:
+                        category_logger_name = 'x_type'
+                    else:
+                        category_logger_name = 'other_type'
+                    
+                    # Log to the specific categorized logger
+                    if category_logger_name in loggers: # Check if the logger exists
+                        loggers[category_logger_name].log_data(current_sample_loss)
+                    else:
+                        # This should not happen if initialize_evaluation_loggers is correct
+                        print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+        
         
         summary_message_start = f"\n--- Epoch {epoch} ---\n"
         print(summary_message_start)
@@ -707,6 +755,7 @@ def vint_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             _, # [batch_size, context_size+1, H, W] 
             action_label,
+            _,
             _
         ) = data
 
@@ -742,7 +791,7 @@ def vint_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -787,13 +836,7 @@ def vint_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -807,7 +850,7 @@ def vint_evaluate(
 
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, _, action_label, _ = data
+            obs_image, _, action_label, _, traj_names = data
 
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -823,9 +866,31 @@ def vint_evaluate(
             # 计算损失并记录（注意：此处直接用 .item() 记录数值）
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred)
             for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+            action_loss_per_sample = losses["action_loss_per_sample"]
 
+            for sample_idx, traj_name in enumerate(traj_names):
+                current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                # Determine the category based on traj_name
+                if '_f_' in traj_name:
+                    category_logger_name = 'f_type' # Use the simplified category name
+                elif '_s_' in traj_name:
+                    category_logger_name = 's_type'
+                elif '_x_' in traj_name:
+                    category_logger_name = 'x_type'
+                else:
+                    category_logger_name = 'other_type'
+                
+                # Log to the specific categorized logger
+                if category_logger_name in loggers: # Check if the logger exists
+                    loggers[category_logger_name].log_data(current_sample_loss)
+                else:
+                    # This should not happen if initialize_evaluation_loggers is correct
+                    print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+        
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
                 action_log(
@@ -863,19 +928,21 @@ def compute_cnnaux_loss(
     Compute KL loss for cnn feature maps and gaze map.
     """
     def action_reduce(unreduced_loss: torch.Tensor):
+        # Reduce over non-batch dimensions to get loss per batch element
         while unreduced_loss.dim() > 1:
             unreduced_loss = unreduced_loss.mean(dim=-1)
-        return (unreduced_loss).mean()
+        return unreduced_loss
 
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
 
     # MSE Loss
-    action_loss = action_reduce(F.mse_loss(action_pred, action_label, reduction="none"))
+    action_loss = F.mse_loss(action_pred, action_label, reduction="none")
+    action_loss_per_sample = action_reduce(action_loss)
+    action_loss_scalar = action_loss_per_sample.mean()  # mean across the batch
 
     # cosine similarity
-    action_waypts_cos_similarity = action_reduce(F.cosine_similarity(
-        action_pred, action_label, dim=-1
-    ))
+    action_waypts_cos_similarity = F.cosine_similarity(action_pred, action_label, dim=-1)
+    action_waypts_cos_similarity_scalar = action_reduce(action_waypts_cos_similarity).mean()
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
@@ -915,13 +982,14 @@ def compute_cnnaux_loss(
 
     # Combine losses with weight
     alpha = 0.5
-    total_loss = (1 - alpha) * action_loss + alpha * auxiliary_loss
+    total_loss = (1 - alpha) * action_loss_scalar + alpha * auxiliary_loss
 
     results = {
-        "action_loss": action_loss,
+        "action_loss": action_loss_scalar,
+        "action_loss_per_sample": action_loss_per_sample,
         "auxiliary_loss": auxiliary_loss,
         "total_loss": total_loss,
-        "action_waypts_cos_sim": action_waypts_cos_similarity,
+        "action_waypts_cos_sim": action_waypts_cos_similarity_scalar,
         "fde": torch.tensor(fde.item(), device=action_label.device),
         "frechet": torch.tensor(np.mean(frechet_dists), device=action_label.device),
         "hausdorff": torch.tensor(np.mean(hausdorff_dists), device=action_label.device),
@@ -996,6 +1064,7 @@ def gnmgazeaux_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             gaze_attention, # [batch_size, (context_size+1) * H/32 * W/32] 
             action_label,
+            _,
             _
         ) = data
 
@@ -1041,7 +1110,7 @@ def gnmgazeaux_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -1077,15 +1146,7 @@ def gnmgazeaux_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "auxiliary_loss": Logger("auxiliary_loss", "test"),
-        "total_loss": Logger("total_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -1097,14 +1158,14 @@ def gnmgazeaux_evaluate(
         desc=f"Evaluating for epoch {epoch}",
     )
 
-    log_file_path = os.path.join(run_folder, "evaluation_log.log") # 评估日志文件名
+    log_file_path = os.path.join(run_folder, "gnmgazeaux.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
     with open(log_file_path, 'a', encoding='utf-8') as f_log:
 
         with torch.no_grad():
             for i, data in enumerate(tqdm_iter):
-                obs_image, gaze_attention, action_label, _ = data
+                obs_image, gaze_attention, action_label, _, traj_names = data
 
                 obs_images = torch.split(obs_image, 3, dim=1)
                 obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
@@ -1125,9 +1186,31 @@ def gnmgazeaux_evaluate(
                 # 计算损失并记录（注意：此处直接用 .item() 记录数值）
                 losses = compute_cnnaux_loss(action_label=action_label, action_pred=action_pred, gaze_map=gaze_attention_flattened, gaze_use_map=gaze_use_map)
                 for key, value in losses.items():
-                    if key in loggers:
-                        loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+                action_loss_per_sample = losses["action_loss_per_sample"]
 
+                for sample_idx, traj_name in enumerate(traj_names):
+                    current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                    # Determine the category based on traj_name
+                    if '_f_' in traj_name:
+                        category_logger_name = 'f_type' # Use the simplified category name
+                    elif '_s_' in traj_name:
+                        category_logger_name = 's_type'
+                    elif '_x_' in traj_name:
+                        category_logger_name = 'x_type'
+                    else:
+                        category_logger_name = 'other_type'
+                    
+                    # Log to the specific categorized logger
+                    if category_logger_name in loggers: # Check if the logger exists
+                        loggers[category_logger_name].log_data(current_sample_loss)
+                    else:
+                        # This should not happen if initialize_evaluation_loggers is correct
+                        print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+        
         summary_message_start = f"\n--- Epoch {epoch} ---\n"
         print(summary_message_start)
         f_log.write(summary_message_start)
@@ -1217,6 +1300,7 @@ def gnmpersonaux_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _,
             _
         ) = data
 
@@ -1279,7 +1363,7 @@ def gnmpersonaux_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -1315,15 +1399,7 @@ def gnmpersonaux_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "auxiliary_loss": Logger("auxiliary_loss", "test"),
-        "total_loss": Logger("total_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -1335,14 +1411,14 @@ def gnmpersonaux_evaluate(
         desc=f"Evaluating for epoch {epoch}",
     )
 
-    log_file_path = os.path.join(run_folder, "evaluation_log.log") # 评估日志文件名
+    log_file_path = os.path.join(run_folder, "gnmpersonaux.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
     with open(log_file_path, 'a', encoding='utf-8') as f_log:
 
         with torch.no_grad():
             for i, data in enumerate(tqdm_iter):
-                obs_image, person_masks, select_labels, action_label, invalid, _ = data
+                obs_image, person_masks, select_labels, action_label, invalid, _, traj_names= data
 
                 obs_images = torch.split(obs_image, 3, dim=1)
                 obs_images = [transform(obs_img).to(device) for obs_img in obs_images]
@@ -1380,8 +1456,31 @@ def gnmpersonaux_evaluate(
                 # 计算损失并记录（注意：此处直接用 .item() 记录数值）
                 losses = compute_cnnaux_loss(action_label=action_label, action_pred=action_pred, gaze_map=gaze_map_normalized, gaze_use_map=gaze_use_map)
                 for key, value in losses.items():
-                    if key in loggers:
-                        loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+                action_loss_per_sample = losses["action_loss_per_sample"]
+
+                for sample_idx, traj_name in enumerate(traj_names):
+                    current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                    # Determine the category based on traj_name
+                    if '_f_' in traj_name:
+                        category_logger_name = 'f_type' # Use the simplified category name
+                    elif '_s_' in traj_name:
+                        category_logger_name = 's_type'
+                    elif '_x_' in traj_name:
+                        category_logger_name = 'x_type'
+                    else:
+                        category_logger_name = 'other_type'
+                    
+                    # Log to the specific categorized logger
+                    if category_logger_name in loggers: # Check if the logger exists
+                        loggers[category_logger_name].log_data(current_sample_loss)
+                    else:
+                        # This should not happen if initialize_evaluation_loggers is correct
+                        print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+
 
         summary_message_start = f"\n--- Epoch {epoch} ---\n"
         print(summary_message_start)
@@ -1418,19 +1517,21 @@ def compute_aux_loss(
         attention_scores: Attention scores [batch_size, seq_len, seq_len]
     """
     def action_reduce(unreduced_loss: torch.Tensor):
+        # Reduce over non-batch dimensions to get loss per batch element
         while unreduced_loss.dim() > 1:
             unreduced_loss = unreduced_loss.mean(dim=-1)
-        return (unreduced_loss).mean()
+        return unreduced_loss
 
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
+    
+    # MSE Loss
+    action_loss = F.mse_loss(action_pred, action_label, reduction="none")
+    action_loss_per_sample = action_reduce(action_loss)
+    action_loss_scalar = action_loss_per_sample.mean()  # mean across the batch
 
-    # Action prediction loss
-    action_loss = action_reduce(F.mse_loss(action_pred, action_label, reduction="none"))
-
-    # Cosine similarity
-    action_waypts_cos_similarity = action_reduce(F.cosine_similarity(
-        action_pred, action_label, dim=-1
-    ))
+    # cosine similarity
+    action_waypts_cos_similarity = F.cosine_similarity(action_pred, action_label, dim=-1)
+    action_waypts_cos_similarity_scalar = action_reduce(action_waypts_cos_similarity).mean()
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
@@ -1478,17 +1579,18 @@ def compute_aux_loss(
 
     # Combine losses with weight
     alpha = 0.5
-    total_loss = (1 - alpha) * action_loss + alpha * token_aux_loss
+    total_loss = (1 - alpha) * action_loss_scalar + alpha * token_aux_loss
 
     results = {
-        "action_loss": action_loss,
+        "action_loss": action_loss_scalar,
         "auxiliary_loss": token_aux_loss,
         "total_loss": total_loss,
-        "action_waypts_cos_sim": action_waypts_cos_similarity,
+        "action_waypts_cos_sim": action_waypts_cos_similarity_scalar,
         "fde": torch.tensor(fde.item(), device=action_label.device),
         "frechet": torch.tensor(np.mean(frechet_dists), device=action_label.device),
         "hausdorff": torch.tensor(np.mean(hausdorff_dists), device=action_label.device),
     }
+
     return results
 
 
@@ -1558,6 +1660,7 @@ def gazeaux_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             gaze_attention, # [batch_size, context_size+1, H, W]
             action_label,
+            _,
             _
         ) = data
 
@@ -1605,7 +1708,7 @@ def gazeaux_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -1650,15 +1753,7 @@ def gazeaux_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "auxiliary_loss": Logger("auxiliary_loss", "test"),
-        "total_loss": Logger("total_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -1672,7 +1767,7 @@ def gazeaux_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_attention, action_label, _ = data
+            obs_image, gaze_attention, action_label, _, traj_names = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1700,8 +1795,31 @@ def gazeaux_evaluate(
                 attention_scores=attention_scores
             )
             for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+            action_loss_per_sample = losses["action_loss_per_sample"]
+
+            for sample_idx, traj_name in enumerate(traj_names):
+                current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                # Determine the category based on traj_name
+                if '_f_' in traj_name:
+                    category_logger_name = 'f_type' # Use the simplified category name
+                elif '_s_' in traj_name:
+                    category_logger_name = 's_type'
+                elif '_x_' in traj_name:
+                    category_logger_name = 'x_type'
+                else:
+                    category_logger_name = 'other_type'
+                
+                # Log to the specific categorized logger
+                if category_logger_name in loggers: # Check if the logger exists
+                    loggers[category_logger_name].log_data(current_sample_loss)
+                else:
+                    # This should not happen if initialize_evaluation_loggers is correct
+                    print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+        
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
@@ -1798,6 +1916,7 @@ def personaux_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _,
             _
         ) = data
 
@@ -1862,7 +1981,7 @@ def personaux_train(
         ) """
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -1907,15 +2026,7 @@ def personaux_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "auxiliary_loss": Logger("auxiliary_loss", "test"),
-        "total_loss": Logger("total_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -1929,7 +2040,7 @@ def personaux_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, person_masks, select_labels, action_label, invalid, _ = data
+            obs_image, person_masks, select_labels, action_label, invalid, _, traj_names = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -1974,8 +2085,31 @@ def personaux_evaluate(
                 attention_scores=attention_scores
             )
             for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+                    action_loss_per_sample = losses["action_loss_per_sample"]
+
+                    for sample_idx, traj_name in enumerate(traj_names):
+                        current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                        # Determine the category based on traj_name
+                        if '_f_' in traj_name:
+                            category_logger_name = 'f_type' # Use the simplified category name
+                        elif '_s_' in traj_name:
+                            category_logger_name = 's_type'
+                        elif '_x_' in traj_name:
+                            category_logger_name = 'x_type'
+                        else:
+                            category_logger_name = 'other_type'
+                        
+                        # Log to the specific categorized logger
+                        if category_logger_name in loggers: # Check if the logger exists
+                            loggers[category_logger_name].log_data(current_sample_loss)
+                        else:
+                            # This should not happen if initialize_evaluation_loggers is correct
+                            print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
@@ -2160,7 +2294,7 @@ def gnmgazechannel_evaluate(
         desc=f"Evaluating for epoch {epoch}",
     )
 
-    log_file_path = os.path.join(run_folder, "evaluation_log.log") # 评估日志文件名
+    log_file_path = os.path.join(run_folder, "gnmgazechannel.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
     with open(log_file_path, 'a', encoding='utf-8') as f_log:
@@ -2568,7 +2702,7 @@ def gnmpersonchannel_evaluate(
         desc=f"Evaluating for epoch {epoch}",
     )
     
-    log_file_path = os.path.join(run_folder, "evaluation_log.log") # 评估日志文件名
+    log_file_path = os.path.join(run_folder, "gnmpersonchannel.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
     with open(log_file_path, 'a', encoding='utf-8') as f_log:
@@ -2915,6 +3049,7 @@ def gazetoken_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             gaze_maps, # [batch_size, context_size+1, H, W]
             action_label,
+            _,
             _
         ) = data
 
@@ -2941,7 +3076,7 @@ def gazetoken_train(
         scaler.update()
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -2986,14 +3121,7 @@ def gazetoken_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
-
+    loggers = initialize_evaluation_loggers()
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
     tqdm_iter = tqdm.tqdm(
@@ -3006,7 +3134,7 @@ def gazetoken_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_maps, action_label, _ = data
+            obs_image, gaze_maps, action_label, _, traj_names = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -3024,8 +3152,31 @@ def gazetoken_evaluate(
             # 计算损失并记录（注意：此处直接用 .item() 记录数值）
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred,)
             for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+                    action_loss_per_sample = losses["action_loss_per_sample"]
+
+                    for sample_idx, traj_name in enumerate(traj_names):
+                        current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                        # Determine the category based on traj_name
+                        if '_f_' in traj_name:
+                            category_logger_name = 'f_type' # Use the simplified category name
+                        elif '_s_' in traj_name:
+                            category_logger_name = 's_type'
+                        elif '_x_' in traj_name:
+                            category_logger_name = 'x_type'
+                        else:
+                            category_logger_name = 'other_type'
+                        
+                        # Log to the specific categorized logger
+                        if category_logger_name in loggers: # Check if the logger exists
+                            loggers[category_logger_name].log_data(current_sample_loss)
+                        else:
+                            # This should not happen if initialize_evaluation_loggers is correct
+                            print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 
@@ -3118,6 +3269,7 @@ def persontoken_train(
             select_labels, # [batch_size, num_persons]
             action_label,
             invalid, # [batch_size, num_persons]
+            _,
             _
         ) = data
 
@@ -3154,7 +3306,7 @@ def persontoken_train(
         scaler.update()
 
         for key, value in losses.items():
-            if key in loggers:
+            if key != "action_loss_per_sample" and key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
 
@@ -3199,13 +3351,7 @@ def persontoken_evaluate(
     model.eval()
 
     # 初始化日志器
-    loggers = {
-        "action_loss": Logger("action_loss", "test"),
-        "action_waypts_cos_sim": Logger("action_waypts_cos_sim", "test"),
-        "fde": Logger("fde", "test"),
-        "frechet": Logger("frechet", "test"),
-        "hausdorff": Logger("hausdorff", "test"),
-    }
+    loggers = initialize_evaluation_loggers()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
@@ -3219,7 +3365,7 @@ def persontoken_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, person_masks, select_labels, action_label, invalid, _ = data
+            obs_image, person_masks, select_labels, action_label, invalid, _, traj_names = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -3247,8 +3393,31 @@ def persontoken_evaluate(
             # 计算损失并记录（注意：此处直接用 .item() 记录数值）
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred,)
             for key, value in losses.items():
-                if key in loggers:
-                    loggers[key].log_data(value.item())
+                    if key != "action_loss_per_sample":
+                        if key in loggers:
+                            loggers[key].log_data(value.item())
+            action_loss_per_sample = losses["action_loss_per_sample"]
+
+            for sample_idx, traj_name in enumerate(traj_names):
+                current_sample_loss = action_loss_per_sample[sample_idx].item()
+
+                # Determine the category based on traj_name
+                if '_f_' in traj_name:
+                    category_logger_name = 'f_type' # Use the simplified category name
+                elif '_s_' in traj_name:
+                    category_logger_name = 's_type'
+                elif '_x_' in traj_name:
+                    category_logger_name = 'x_type'
+                else:
+                    category_logger_name = 'other_type'
+                
+                # Log to the specific categorized logger
+                if category_logger_name in loggers: # Check if the logger exists
+                    loggers[category_logger_name].log_data(current_sample_loss)
+                else:
+                    # This should not happen if initialize_evaluation_loggers is correct
+                    print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
+        
 
             # 只对最后一个batch进行可视化
             if i == num_batches - 1: 

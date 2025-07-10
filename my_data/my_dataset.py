@@ -694,5 +694,6 @@ class ActDataset(BaseDataset):
             torch.as_tensor(person_masks, dtype=torch.bool),
             torch.as_tensor(winner_labels_to_return, dtype=torch.bool),
             torch.as_tensor(actions, dtype=torch.float32),
-            torch.tensor(i, dtype=torch.long)                          # Original dataset index (供 collate_fn 或 generate_selector_predictions 使用)
+            torch.tensor(i, dtype=torch.long),  # Original dataset index (供 collate_fn 或 generate_selector_predictions 使用)
+            traj_name
         )
