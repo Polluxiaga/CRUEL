@@ -248,13 +248,22 @@ def train_eval_loop(
 
 
 def count_parameters(model):
-    table = PrettyTable(["Modules", "Parameters"])
-    total_params = 0
+    if model is None:
+        print("count_parameters: model is None")
+        return 0
+
+    table = PrettyTable(["Module", "Parameters", "Trainable"])
+    total_trainable = 0
+    total_all = 0
     for name, parameter in model.named_parameters():
-        if not parameter.requires_grad: continue
         params = parameter.numel()
-        table.add_row([name, params])
-        total_params += params
-    # print(table)
-    print(f"Total Trainable Params: {total_params/1e6:.2f}M")
-    return total_params
+        table.add_row([name, params, parameter.requires_grad])
+        total_all += params
+        if parameter.requires_grad:
+            total_trainable += params
+
+    print(table)  # Print the full table of parameters
+    print(f"Total Trainable Params: {total_trainable/1e6:.2f}M")
+    if total_all != total_trainable:
+        print(f"Total Params (including non-trainable): {total_all/1e6:.2f}M")
+    return total_trainable

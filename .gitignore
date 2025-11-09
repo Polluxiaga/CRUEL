@@ -4,11 +4,13 @@ manual_gaze_csv/*
 debugdata/*
 debugdata_splits/*
 data/*
+DPT/*
 data_vis/*
 data_splits/*
 .vscode/*
 */.vscode/*
 
+*.log
 *.png
 *.jpg
 *.pth

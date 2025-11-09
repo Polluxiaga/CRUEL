@@ -4,15 +4,15 @@ run_name: vint
 # run_id: "28bzh5w3"
 
 # training setup
-gpu_id: 2
-use_wandb: True # set to false if you don't want to log to wandb
+gpu_id: 0
+use_wandb: False # set to false if you don't want to log to wandb
 wandb_log_freq: 220 # in iterations
 
 # for obs_method: gaze or gazeplus or 1phase or 1phaseplus
-# for act_method:vint or gazeaux or personaux or gazechannel or personchannel or gazefov or personfov or gazetoken or persontoken
-#                gnm or gnmgazeaux or gnmpersonaux or gnmgazechannel or gnmpersonchannel or gnmgazefov or gnmpersonfov
-method: "vint" 
-wg_origin: "1phase" #GT or gaze or gazeplus or 2phase or 2phaseplus or 1phase or 1phaseplus
+# for act_method: vint or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken
+#                 gnm or gnmgazeaux or gnmpersonaux or gnmgazechannel or gnmpersonchannel
+method: "persontoken" 
+wg_origin: "GT" # GT or gaze or gazeplus or 2phase or 2phaseplus or 1phase or 1phaseplus
 
 iftrain: True
 ifgenerate: False
@@ -20,7 +20,7 @@ batch_size: 64
 
 batch_size_obs_model: 128
 batch_size_act_model: 64
-act_lr: 5e-4
+act_lr: 1e-4
 obs_lr: 1e-4
 epochs: 200
 num_workers: 8
@@ -33,12 +33,12 @@ warmup_epochs: 4
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
-seed: 0
+seed: 1
 
 # Early stopping parameters
 early_stopping: true  # 是否启用早停
-patience: 200         # 容忍多少个epoch测试损失没有改善
-min_delta: 0.0001    # 改善阈值
+patience: 20        # 容忍多少个epoch测试损失没有改善
+min_delta: 0.01    # 改善阈值
 
 # 保存1phase_winner, 1phaseplus_winner, gaze_gen, gazeplus_gen, 2phase_winner, 2phaseplus_winner的路径
 save_train_raw_path: "/home/yzc/CRUEL/data_splits/train"
@@ -94,5 +94,5 @@ print_log_freq: 220 # in iterations
 image_log_freq: 220 # in iterations
 num_images_log: 3 #0 
 pairwise_test_freq: 0 # in epochs
-eval_fraction: 1
+eval_fraction: 0.25
 eval_freq: 1 # in epochs

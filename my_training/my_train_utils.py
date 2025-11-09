@@ -1558,13 +1558,14 @@ def compute_aux_loss(
         hausdorff = max(h1, h2)
         hausdorff_dists.append(hausdorff)
 
+    gaze_map_normalized = F.softmax(gaze_map.view(gaze_map.size(0), -1), dim=1)
     # Process attention scores to get token importance vector
     # Sum over queries to get importance of each key
     gaze_use_vector = attention_scores.sum(dim=1)  # [batch_size, seq_len]
-    
+    if gaze_use_vector.dim() == 2 and gaze_use_vector.size(1) == 2*gaze_map_normalized.size(1):
+        gaze_use_vector = gaze_use_vector[:, :gaze_map_normalized.size(1)]
     # Ensure both distributions sum to 1
     gaze_use_vector = F.softmax(gaze_use_vector, dim=1)
-    gaze_map_normalized = F.softmax(gaze_map.view(gaze_map.size(0), -1), dim=1)
 
     assert gaze_use_vector.shape == gaze_map_normalized.shape, \
         f"Shape mismatch for KLDivLoss: gaze_use_vector {gaze_use_vector.shape} vs gaze_map_normalized {gaze_map_normalized.shape}"
@@ -1583,6 +1584,7 @@ def compute_aux_loss(
 
     results = {
         "action_loss": action_loss_scalar,
+        "action_loss_per_sample": action_loss_per_sample,
         "auxiliary_loss": token_aux_loss,
         "total_loss": total_loss,
         "action_waypts_cos_sim": action_waypts_cos_similarity_scalar,
@@ -2407,6 +2409,7 @@ def gazechannel_train(
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
             gaze_maps, # [batch_size, context_size+1, H, W]
             action_label,
+            _,
             _
         ) = data
 
@@ -2498,7 +2501,7 @@ def gazechannel_evaluate(
     
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
-            obs_image, gaze_maps, action_label, _ = data
+            obs_image, gaze_maps, action_label, _, traj_names = data
     
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
@@ -3291,14 +3294,30 @@ def persontoken_train(
         person_masks = person_masks * select_mask.float()  # Zero out invalid masks, [B, P, C, H, W]
         person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
 
+        # Pool person_attention to match output size
+        output_h = person_attention.shape[2] // 32
+        output_w = person_attention.shape[3] // 32
+        person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+        
+        person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+        max_val = person_attention_flattened.max()
+        if max_val > 0:
+            gaze_map_normalized = person_attention_flattened / max_val
+        else:
+            gaze_map_normalized = person_attention_flattened # If all zeros, keep it as is
+
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
 
         with autocast():
             action_pred, attention_scores = model(obs_image, person_attention)
-            losses = compute_baseloss(
-            action_label=action_label, action_pred=action_pred,)
+            losses = compute_aux_loss(
+            action_label=action_label,
+            action_pred=action_pred,
+            gaze_map=gaze_map_normalized,
+            attention_scores=attention_scores
+            )
             loss = losses["action_loss"]
 
         scaler.scale(loss).backward()
@@ -3385,13 +3404,30 @@ def persontoken_evaluate(
             person_masks = person_masks * select_mask.float()  # Zero out invalid masks
             person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
 
+            # Pool person_attention to match output size
+            output_h = person_attention.shape[2] // 32
+            output_w = person_attention.shape[3] // 32
+            person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
+        
+            person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
+            max_val = person_attention_flattened.max()
+            if max_val > 0:
+                gaze_map_normalized = person_attention_flattened / max_val
+            else:
+                gaze_map_normalized = person_attention_flattened # If all zeros, keep it as is
+
             action_label = action_label.to(device)
 
             # 前向推理
             action_pred, attention_scores = model(obs_image, person_attention)
 
-            # 计算损失并记录（注意：此处直接用 .item() 记录数值）
-            losses = compute_baseloss(action_label=action_label, action_pred=action_pred,)
+            losses = compute_aux_loss(
+            action_label=action_label,
+            action_pred=action_pred,
+            gaze_map=gaze_map_normalized,
+            attention_scores=attention_scores
+            )
+
             for key, value in losses.items():
                     if key != "action_loss_per_sample":
                         if key in loggers:

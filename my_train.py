@@ -40,7 +40,7 @@ from my_data.my_dataset import ObsDataset, ActDataset
 from my_model.act_models import vint_model, channel_model, catoken_model, gnm_model, gnmchannel_model
 from my_model.observe_models import WinnerSelectorPlus, GazePredictorPlus
 from my_training.my_train_utils import act_person_collate_fn, obs_person_collate_fn, act_base_collate_fn, obs_base_collate_fn, render_fixations_to_gaze_maps
-from my_training.my_train_eval_loop import train_eval_loop, load_model
+from my_training.my_train_eval_loop import train_eval_loop, load_model, count_parameters
 
 
 def generate_attnmap(
@@ -737,13 +737,19 @@ def main(config):
                     print("Pretrained obs_model loaded successfully.")
                 else:
                     raise FileNotFoundError(f"Pretrained model not found at {model_path}")
+            
+            total_params = count_parameters(obs_model)
+            print(f"Obs model total params: {total_params} ({total_params/1e6:.2f}M)")
+            if config.get("use_wandb", False):
+                wandb.log({"obs_total_params": total_params}, commit=False)
+
         else:
             act_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["act_lr"]), model_type="act_model")
             obs_model = None  # Only act_model is primary
             
             # 加载预训练模型用于评估
             if not config["iftrain"]:
-                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pth"
+                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pt"
                 if os.path.exists(model_path):
                     print(f"Loading pretrained act_model from: {model_path}")
                     checkpoint = torch.load(model_path, map_location=device)
@@ -751,6 +757,11 @@ def main(config):
                     print("Pretrained act_model loaded successfully.")
                 else:
                     raise FileNotFoundError(f"Pretrained model not found at {model_path}")
+                
+            total_params = count_parameters(act_model)
+            print(f"Act model total params: {total_params} ({total_params/1e6:.2f}M)")
+            if config.get("use_wandb", False):
+                wandb.log({"act_total_params": total_params}, commit=False)
 
         train_eval_loop(
             train_method=config["method"],
