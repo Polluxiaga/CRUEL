@@ -58,11 +58,6 @@ class DeepSort(object):
             outputs = np.stack(outputs, axis=0)
         return outputs, mask_outputs
 
-    """
-    TODO:
-        Convert bbox from xc_yc_w_h to xtl_ytl_w_h
-    Thanks JieChen91@github.com for reporting this bug!
-    """
 
     @staticmethod
     def _xywh_to_tlwh(bbox_xywh):
@@ -83,11 +78,6 @@ class DeepSort(object):
         return x1, y1, x2, y2
 
     def _tlwh_to_xyxy(self, bbox_tlwh):
-        """
-        TODO:
-            Convert bbox from xtl_ytl_w_h to xc_yc_w_h
-        Thanks JieChen91@github.com for reporting this bug!
-        """
         x, y, w, h = bbox_tlwh
         x1 = max(int(x), 0)
         x2 = min(int(x + w), self.width - 1)

@@ -1,15 +1,8 @@
-# vim: expandtab:ts=4:sw=4
 import numpy as np
-import cv2
 
 
 def non_max_suppression(boxes, max_bbox_overlap, scores=None):
     """Suppress overlapping detections.
-
-    Original code from [1]_ has been adapted to include confidence score.
-
-    .. [1] http://www.pyimagesearch.com/2015/02/16/
-           faster-non-maximum-suppression-python/
 
     Examples
     --------
