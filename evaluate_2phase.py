@@ -8,11 +8,11 @@ from typing import List, Tuple, Set
 
 # --- Configuration Paths ---
 # Your root directory containing all trajectory subfolders (each with person_ids.pkl and select_ids.pkl)
-DATA_ROOT_FOLDER = '/home/yzc/CRUEL/data' 
+DATA_ROOT_FOLDER = '/your_folder/data' 
 
 # Path to your generated select_ids file (typically 2phase.pt)
 # Adjust this path based on whether you're evaluating train or test set
-GENERATED_SELECT_IDS_PATH = '/home/yzc/CRUEL/data_splits/train/2phaseplus.pt' 
+GENERATED_SELECT_IDS_PATH = '/your_folder/data_splits/train/2phaseplus.pt' 
 # --- End Configuration ---
 
 # --- Evaluation Display Settings ---

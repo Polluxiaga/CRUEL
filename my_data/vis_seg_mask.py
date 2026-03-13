@@ -67,4 +67,4 @@ def visualize_csv_masks(folder_path, save_visualized=False):
 
 
 if __name__ == "__main__":
-    visualize_csv_masks("/home/yzc/CRUEL/data_vis", save_visualized=True)
+    visualize_csv_masks("/your_folder/data_vis", save_visualized=True)

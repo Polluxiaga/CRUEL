@@ -528,8 +528,8 @@ def main(config):
     if config["method"] in ["1phase", "1phaseplus", "gaze", "gazeplus"]:
 
         use_generated_attnmaps = False if config["method"] in ["1phase", "gaze"] else True
-        train_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "/home/yzc/CRUEL/data_splits/train/attnmap_used.pt"
-        test_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "/home/yzc/CRUEL/data_splits/test/attnmap_used.pt"
+        train_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "your_folder/data_splits/train/attnmap_used.pt"
+        test_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "your_folder/data_splits/test/attnmap_used.pt"
 
         # Create datasets for obs_model training
         train_dataset_obs = ConcatDataset([
@@ -597,8 +597,8 @@ def main(config):
             test_gen_labels_path = None
         else:
             use_generated_labels = True
-            train_gen_labels_path = f'/home/yzc/CRUEL/data_splits/train/{config["wg_origin"]}.pt'
-            test_gen_labels_path = f'/home/yzc/CRUEL/data_splits/test/{config["wg_origin"]}.pt'
+            train_gen_labels_path = f'/your_folder/data_splits/train/{config["wg_origin"]}.pt'
+            test_gen_labels_path = f'/your_folder/data_splits/test/{config["wg_origin"]}.pt'
 
         # Create datasets for act_model training
         train_dataset_act = ConcatDataset([
@@ -729,7 +729,7 @@ def main(config):
             
             # 加载预训练模型用于评估
             if not config["iftrain"]:
-                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pt"
+                model_path = f"/your_folder/data_splits/weights/best_{config['method']}.pt"
                 if os.path.exists(model_path):
                     print(f"Loading pretrained obs_model from: {model_path}")
                     checkpoint = torch.load(model_path, map_location=device)
@@ -749,7 +749,7 @@ def main(config):
             
             # 加载预训练模型用于评估
             if not config["iftrain"]:
-                model_path = f"/home/yzc/CRUEL/data_splits/weights/best_{config['method']}.pt"
+                model_path = f"/your_folder/data_splits/weights/best_{config['method']}.pt"
                 if os.path.exists(model_path):
                     print(f"Loading pretrained act_model from: {model_path}")
                     checkpoint = torch.load(model_path, map_location=device)

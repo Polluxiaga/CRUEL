@@ -5,7 +5,7 @@ import numpy as np
 from math import sqrt, isnan
 from pathlib import Path
 
-ROOT_FOLDER = "/home/yzc/CRUEL/data"  # 修改为你的数据文件夹路径
+ROOT_FOLDER = "/your_folder/data"  # 修改为你的数据文件夹路径
 
 def calculate_speed(csv_path):
     """计算速度并返回(速度, 坐标数组)"""

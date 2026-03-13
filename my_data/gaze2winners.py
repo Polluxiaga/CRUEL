@@ -219,14 +219,14 @@ def extract_and_save_all_selected_ids(root_folder: str,
 
 # --- 如何使用修改后的脚本 ---
 if __name__ == "__main__":
-    root_directory = '/home/yzc/CRUEL/data' 
+    root_directory = '/your_folder/data' 
 
     # --------------------------------------------------------------------------
     # 定义所有需要加载的 gaze.pt 文件及其对应的输出 2phase.pt 文件路径
     # 结构: (gaze_pt_input_path, phase_pt_output_path)
     split_paths = [
-        ("/home/yzc/CRUEL/data_splits/test/gazeplus.pt", "/home/yzc/CRUEL/data_splits/test/2phaseplus.pt"),
-        ("/home/yzc/CRUEL/data_splits/train/gazeplus.pt", "/home/yzc/CRUEL/data_splits/train/2phaseplus.pt")
+        ("/your_folder/data_splits/test/gazeplus.pt", "/your_folder/data_splits/test/2phaseplus.pt"),
+        ("/your_folder/data_splits/train/gazeplus.pt", "/your_folder/data_splits/train/2phaseplus.pt")
     ]
     # --------------------------------------------------------------------------
     

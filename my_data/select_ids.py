@@ -220,7 +220,7 @@ if __name__ == "__main__":
     # IMPORTANT: Set your root directory here! This is the main folder containing your subfolders.
     # Example for Windows: root_directory = 'C:\\Users\\YourUser\\MyProjectData'
     # Example for macOS/Linux: root_directory = '/Users/YourUser/Documents/ExperimentData'
-    root_directory = '/home/yzc/CRUEL/data' # <<< DOUBLE-CHECK AND CHANGE THIS PATH if needed!
+    root_directory = '/your_folder/data' # <<< DOUBLE-CHECK AND CHANGE THIS PATH if needed!
 
     if not os.path.isdir(root_directory):
         print(f"Error: The specified root directory '{root_directory}' does not exist.")

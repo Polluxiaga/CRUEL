@@ -241,7 +241,7 @@ def process_pickle_and_apply_masks(filepath, data_folder, image_width, image_hei
 if __name__ == "__main__":
     # === CONFIGURE YOUR ROOT DIRECTORY HERE ===
     # This should be the main folder containing all your subfolders (e.g., 't/subfolder1', 't/subfolder2')
-    root_directory = '/home/yzc/CRUEL/data_vis' # <<< DOUBLE-CHECK AND CHANGE THIS PATH!
+    root_directory = '/your_folder/data_vis' # <<< DOUBLE-CHECK AND CHANGE THIS PATH!
 
     print("--- ⚠️⚠️⚠️ WARNING: THIS SCRIPT WILL OVERWRITE YOUR ORIGINAL JPG FILES. ⚠️⚠️⚠️ ---")
     print("--- PLEASE BACK UP YOUR DATA BEFORE PROCEEDING. ---")

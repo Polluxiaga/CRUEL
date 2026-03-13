@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # IMPORTANT: Replace './your_root_folder' with the actual path to your target folder!
     # Example for Windows: root_directory = 'C:\\Users\\YourUser\\YourProjectData'
     # Example for macOS/Linux: root_directory = '/Users/YourUser/YourProjectData'
-    root_directory = '/home/yzc/CRUEL/data' # This path is from your previous input.
+    root_directory = '/your_folder/data' # This path is from your previous input.
 
     if not os.path.isdir(root_directory):
         print(f"Error: The specified root directory '{root_directory}' does not exist.")
