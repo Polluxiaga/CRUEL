@@ -1,25 +1,26 @@
+"""Evaluate generated 2phase/2phaseplus salient-person IDs against ground truth."""
+
+import argparse
 import os
 import pickle
 import torch
-import numpy as np
 from collections import defaultdict
-from sklearn.metrics import precision_score, recall_score, f1_score # Accuracy is less direct here
 from typing import List, Tuple, Set
 
 # --- Configuration Paths ---
 # Your root directory containing all trajectory subfolders (each with person_ids.pkl and select_ids.pkl)
-DATA_ROOT_FOLDER = '/your_folder/data' 
+DATA_ROOT_FOLDER = "data"
 
 # Path to your generated select_ids file (typically 2phase.pt)
 # Adjust this path based on whether you're evaluating train or test set
-GENERATED_SELECT_IDS_PATH = '/your_folder/data_splits/train/2phaseplus.pt' 
+GENERATED_SELECT_IDS_PATH = "data_splits/test/2phaseplus.pt"
 # --- End Configuration ---
 
 # --- Evaluation Display Settings ---
 NUM_TRAJS_TO_PRINT_SUMMARY = 1 # Number of lowest F1-score trajectories to display in the summary
 NUM_TRAJS_TO_PRINT_DETAIL = 5   # Number of lowest F1-score trajectories for detailed frame-by-frame labels
 # Minimum number of unique person IDs for a trajectory to be included in per-trajectory metric calculation
-MIN_UNIQUE_PERSONS_FOR_TRAJ_METRICS = 5 
+MIN_UNIQUE_PERSONS_FOR_TRAJ_METRICS = 5
 # --- End Evaluation Display Settings ---
 
 
@@ -27,14 +28,14 @@ class SelectIDComparer:
     def __init__(self, data_root_folder: str, generated_select_ids_path: str):
         self.data_root_folder = data_root_folder
         self.generated_select_ids_path = generated_select_ids_path
-        
+
         # Cache for original person_ids.pkl and select_ids.pkl (Ground Truth)
         self.person_ids_cache = {}
-        self.gt_select_ids_cache = {} 
+        self.gt_select_ids_cache = {}
 
         # Store per-frame data for detailed printing (for lowest F1 trajectories)
         # Structure: {traj_name: [(frame_idx, gt_labels_list, pred_labels_list, person_ids_list), ...]}
-        self.per_trajectory_data_frames = defaultdict(list) 
+        self.per_trajectory_data_frames = defaultdict(list)
 
         # Store unique collected IDs per trajectory for the new metric calculation
         # Structure: {traj_name: {'gt_ids': set(), 'pred_ids': set()}}
@@ -104,7 +105,7 @@ class SelectIDComparer:
 
         person_ids_for_frame = all_person_ids[curr_time]
         gt_select_ids_for_frame_raw = all_gt_select_ids[curr_time]
-        
+
         key = (trajectory_name, curr_time)
         predicted_select_ids_for_frame_raw = self.predicted_select_ids.get(key, [])
 
@@ -118,7 +119,7 @@ class SelectIDComparer:
 
         return person_ids_for_frame, gt_labels_for_frame, pred_labels_for_frame
 
-    def calculate_set_metrics(self, gt_set: Set[int], pred_set: Set[int]) -> Tuple[float, float, float]:
+    def calculate_set_metrics(self, gt_set: Set[int], pred_set: Set[int]) -> Tuple[float, float, float, int, int, int]:
         """
         Calculates precision, recall, and f1_score based on two sets of unique IDs.
         """
@@ -129,9 +130,9 @@ class SelectIDComparer:
         # Handle division by zero
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        
+
         f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-        
+
         return precision, recall, f1, tp, fn, fp
 
     def compare_and_evaluate(self):
@@ -143,15 +144,15 @@ class SelectIDComparer:
         sorted_keys = sorted(self.predicted_select_ids.keys(), key=lambda x: (x[0], x[1]))
 
         for key_idx, (traj_name, curr_time) in enumerate(sorted_keys):
-            if (key_idx + 1) % 5000 == 0: 
+            if (key_idx + 1) % 5000 == 0:
                 print(f"  Processed {key_idx + 1}/{len(sorted_keys)} frames...")
 
             person_ids_for_frame, gt_labels_for_frame, pred_labels_for_frame = \
                 self._get_gt_and_pred_labels_for_frame(traj_name, curr_time)
-            
+
             # Only consider frames with actual persons for evaluation
             if not person_ids_for_frame:
-                continue 
+                continue
 
             # The filtering ensures label lengths match by design now
             # if len(gt_labels_for_frame) != len(pred_labels_for_frame):
@@ -207,9 +208,9 @@ class SelectIDComparer:
             # Filter out trajectories with too few unique persons for meaningful metrics
             if len(gt_ids.union(pred_ids)) < MIN_UNIQUE_PERSONS_FOR_TRAJ_METRICS:
                  continue
-            
+
             precision, recall, f1, tp, fn, fp = self.calculate_set_metrics(gt_ids, pred_ids)
-            
+
             per_traj_metrics[traj_name] = {
                 'precision': precision,
                 'recall': recall,
@@ -221,7 +222,7 @@ class SelectIDComparer:
                 'total_pred_ids': len(pred_ids),
                 'total_unique_ids_in_frame': len(gt_ids.union(pred_ids)) # union of all seen GT/Pred IDs
             }
-        
+
         # Sort by F1-score ascending
         sorted_traj_by_f1 = sorted(per_traj_metrics.items(), key=lambda item: item[1]['f1'])
 
@@ -237,14 +238,14 @@ class SelectIDComparer:
                 print(f"    TP: {metrics['tp']}, FN: {metrics['fn']}, FP: {metrics['fp']}")
                 print(f"    Total Unique GT IDs: {metrics['total_gt_ids']}, Total Unique Pred IDs: {metrics['total_pred_ids']}")
                 print("    ---")
-        
+
         # --- Detailed Frame-by-Frame Labels (for Top Lowest F1-score Trajectories) ---
         print(f"\n--- Detailed Frame-by-Frame Labels for Top {NUM_TRAJS_TO_PRINT_DETAIL} Lowest F1-score Trajectories ---")
         detailed_printed_count = 0
         for traj_name, metrics in sorted_traj_by_f1:
             if detailed_printed_count >= NUM_TRAJS_TO_PRINT_DETAIL:
                 break
-            
+
             # Ensure this trajectory had frame data collected and meets the unique person threshold
             if traj_name not in self.per_trajectory_data_frames or \
                len(self.trajectory_unique_ids[traj_name]['gt_ids'].union(self.trajectory_unique_ids[traj_name]['pred_ids'])) < MIN_UNIQUE_PERSONS_FOR_TRAJ_METRICS:
@@ -257,19 +258,19 @@ class SelectIDComparer:
             print(f"  ------|------------------|------------------|------------")
             print(f"  Frame | Person IDs       | GT Labels        | Pred Labels")
             print(f"  ------|------------------|------------------|------------")
-            
+
             # Get and sort all frame data for this trajectory
             sorted_frames_data = sorted(self.per_trajectory_data_frames[traj_name], key=lambda x: x[0])
 
             for frame_idx, gt_labels, pred_labels, person_ids in sorted_frames_data:
                 # Pad strings for alignment
                 person_ids_str = str(person_ids).ljust(16)
-                gt_str = str(gt_labels).ljust(16) 
+                gt_str = str(gt_labels).ljust(16)
                 pred_str = str(pred_labels)
                 print(f"  {frame_idx:<5} | {person_ids_str} | {gt_str} | {pred_str}")
-            
+
             detailed_printed_count += 1
-            print("------------------------------------------------------------------") 
+            print("------------------------------------------------------------------")
 
         if detailed_printed_count == 0 and len(sorted_traj_by_f1) > 0:
             print(f"No trajectories met the criteria for detailed printing (e.g., MIN_UNIQUE_PERSONS_FOR_TRAJ_METRICS not met or no frames data).")
@@ -279,5 +280,10 @@ class SelectIDComparer:
         print("\n--- End Evaluation Report ---")
 
 if __name__ == "__main__":
-    comparer = SelectIDComparer(DATA_ROOT_FOLDER, GENERATED_SELECT_IDS_PATH)
+    parser = argparse.ArgumentParser(description="Evaluate generated salient-person IDs.")
+    parser.add_argument("--data_root", default=DATA_ROOT_FOLDER, help="Root folder containing trajectory subfolders.")
+    parser.add_argument("--generated", default=GENERATED_SELECT_IDS_PATH, help="Path to generated 2phase/2phaseplus .pt file.")
+    args = parser.parse_args()
+
+    comparer = SelectIDComparer(args.data_root, args.generated)
     comparer.compare_and_evaluate()

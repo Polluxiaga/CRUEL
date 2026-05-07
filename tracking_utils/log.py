@@ -1,7 +1,10 @@
+"""Logging helper shared by detector and tracker scripts."""
+
 import logging
 
 
 def get_logger(name='root'):
+    """Return a console logger without adding duplicate handlers."""
     logger = logging.getLogger(name)
 
     # 避免重复添加 handler

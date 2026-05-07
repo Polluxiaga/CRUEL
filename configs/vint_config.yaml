@@ -1,7 +1,9 @@
-project_name: my_vint
+project_name: gaze2nav
 run_name: vint
-# load_run: "my_vint/vint_2025_04_09_00_47_49"
+# load_run: "gaze2nav/vint_YYYY_MM_DD_HH_MM_SS"
 # run_id: "28bzh5w3"
+log_root: logs
+wandb_entity: null
 
 # training setup
 gpu_id: 0
@@ -11,7 +13,7 @@ wandb_log_freq: 220 # in iterations
 # for obs_method: gaze or gazeplus or 1phase or 1phaseplus
 # for act_method: vint or gazeaux or personaux or gazechannel or personchannel or gazetoken or persontoken
 #                 gnm or gnmgazeaux or gnmpersonaux or gnmgazechannel or gnmpersonchannel
-method: "persontoken" 
+method: "persontoken"
 wg_origin: "GT" # GT or gaze or gazeplus or 2phase or 2phaseplus or 1phase or 1phaseplus
 
 iftrain: True
@@ -28,7 +30,7 @@ optimizer: adamw
 clipping: True
 max_norm: 1.
 scheduler: "cosine"
-warmup: True  
+warmup: True
 warmup_epochs: 4
 cyclic_period: 10
 plateau_patience: 3
@@ -41,12 +43,12 @@ patience: 20        # 容忍多少个epoch测试损失没有改善
 min_delta: 0.01    # 改善阈值
 
 # 保存1phase_winner, 1phaseplus_winner, gaze_gen, gazeplus_gen, 2phase_winner, 2phaseplus_winner的路径
-save_train_raw_path: "/home/yzc/CRUEL/data_splits/train"
-save_test_raw_path: "/home/yzc/CRUEL/data_splits/test"
+save_train_raw_path: "/path/to/data_splits/train"
+save_test_raw_path: "/path/to/data_splits/test"
 
 # 加载模型生成raw的路径
-load_obs_model_path: "/home/yzc/CRUEL/data_splits/weights/best_gaze.pth"
-load_act_model_path: "/home/yzc/CRUEL/data_splits/weights/best_gtact.pth"
+load_obs_model_path: "/path/to/checkpoints/best_gaze.pth"
+load_act_model_path: "/path/to/checkpoints/best_gtact.pth"
 
 
 # model params
@@ -74,25 +76,22 @@ goal_type: "image"
 
 datasets:
   debugdata:
-    data_folder: /home/yzc/CRUEL/debugdata
-    train: /home/yzc/CRUEL/debugdata_splits/train/
-    test: /home/yzc/CRUEL/debugdata_splits/test/
-    generated_labels_path: /home/yzc/CRUEL/debugdata_splits/
+    data_folder: /path/to/debugdata
+    train: /path/to/debugdata_splits/train/
+    test: /path/to/debugdata_splits/test/
+    generated_labels_path: /path/to/debugdata_splits/
 
   data:
-    data_folder: /home/yzc/CRUEL/data
-    train: /home/yzc/CRUEL/data_splits/train/ #data_splits_folder
-    test: /home/yzc/CRUEL/data_splits/test/ #data_splits_folder
-    generated_labels_path: /home/yzc/CRUEL/data_splits/ #save generated_labels
-    # data_folder: /Users/pollux/Documents/Robot_Navigation/CRUEL/data
-    # train: /Users/pollux/Documents/Robot_Navigation/CRUEL/data_splits/train/ #data_splits_folder
-    # test: /Users/pollux/Documents/Robot_Navigation/CRUEL/data_splits/test/ #data_splits_folder
+    data_folder: /path/to/data
+    train: /path/to/data_splits/train/ #data_splits_folder
+    test: /path/to/data_splits/test/ #data_splits_folder
+    generated_labels_path: /path/to/data_splits/ #save generated_labels
 
 # logging stuff
 ## =0 turns off
 print_log_freq: 220 # in iterations
 image_log_freq: 220 # in iterations
-num_images_log: 3 #0 
+num_images_log: 3 #0
 pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
 eval_freq: 1 # in epochs

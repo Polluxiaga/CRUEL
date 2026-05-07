@@ -1,3 +1,5 @@
+"""Training, evaluation, loss, logging, and collate utilities for Gaze2Nav."""
+
 import wandb
 import numpy as np
 import os
@@ -7,7 +9,30 @@ from sklearn.metrics import precision_recall_curve, auc
 from typing import List, Dict, Optional, TextIO
 from collections import defaultdict
 from scipy.spatial.distance import directed_hausdorff
-from frechetdist import frdist
+try:
+    from frechetdist import frdist
+except ImportError:
+    def frdist(path_a, path_b):
+        """Small discrete Frechet fallback used when the optional package is absent."""
+        path_a = np.asarray(path_a, dtype=np.float64)
+        path_b = np.asarray(path_b, dtype=np.float64)
+        cache = np.full((len(path_a), len(path_b)), -1.0)
+
+        def _c(i, j):
+            if cache[i, j] > -1:
+                return cache[i, j]
+            dist = np.linalg.norm(path_a[i] - path_b[j])
+            if i == 0 and j == 0:
+                cache[i, j] = dist
+            elif i > 0 and j == 0:
+                cache[i, j] = max(_c(i - 1, 0), dist)
+            elif i == 0 and j > 0:
+                cache[i, j] = max(_c(0, j - 1), dist)
+            else:
+                cache[i, j] = max(min(_c(i - 1, j), _c(i - 1, j - 1), _c(i, j - 1)), dist)
+            return cache[i, j]
+
+        return float(_c(len(path_a) - 1, len(path_b) - 1))
 
 import torch
 import torch.nn as nn
@@ -17,8 +42,8 @@ from torch.optim import Adam
 from torch.cuda.amp import GradScaler, autocast
 from torchvision import transforms
 
-from my_data.my_data_utils import ts2np
-from my_training.my_visualize_utils import action_visualize, obsp_visualize, gaze_visualize
+from gaze2nav.data.utils import ts2np
+from gaze2nav.training.visualization import action_visualize, obsp_visualize, gaze_visualize
 
 
 def obs_base_collate_fn(batch):
@@ -43,7 +68,7 @@ def obs_base_collate_fn(batch):
     mask_batch = torch.stack(mask_padded, dim=0)
 
     return obs_batch, fixations_batch, mask_batch, attnmap_batch, original_idx_batch
-    
+
 
 def act_base_collate_fn(batch):
     """
@@ -53,12 +78,12 @@ def act_base_collate_fn(batch):
     - action_list: action labels
     """
     obs_images, gaze_maps, _, _, action_list, original_idx_list, traj_name_tuple = zip(*batch)
-    
+
     obs_batch = torch.stack(obs_images, dim=0)
     gazemap_batch = torch.stack(gaze_maps, dim=0)
     action_batch = torch.stack(action_list, dim=0)
     original_idx_batch = torch.stack(original_idx_list, dim=0)
-    
+
     return obs_batch, gazemap_batch, action_batch, original_idx_batch, traj_name_tuple
 
 
@@ -433,7 +458,7 @@ def compute_baseloss(
         return unreduced_loss
 
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
-    
+
     # MSE Loss
     action_loss = F.mse_loss(action_pred, action_label, reduction="none")
     action_loss_per_sample = action_reduce(action_loss)
@@ -445,8 +470,8 @@ def compute_baseloss(
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
-        action_pred[:, -1], 
-        action_label[:, -1], 
+        action_pred[:, -1],
+        action_label[:, -1],
         p=2
     ).mean()
 
@@ -521,7 +546,7 @@ def gnm_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -541,7 +566,7 @@ def gnm_train(
     for i, data in enumerate(tqdm_iter):
         (
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
-            _, # [batch_size, context_size+1, H, W] 
+            _, # [batch_size, context_size+1, H, W]
             action_label,
             _,
             _
@@ -554,7 +579,7 @@ def gnm_train(
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
-    
+
         with autocast():
             action_pred = model(obs_image)
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred)
@@ -590,7 +615,7 @@ def gnm_train(
         print_log_freq=1,
         log_file=None, # 传递文件句柄
     )
-        
+
 
 def gnm_evaluate(
     model: nn.Module,
@@ -663,15 +688,15 @@ def gnm_evaluate(
                         category_logger_name = 'x_type'
                     else:
                         category_logger_name = 'other_type'
-                    
+
                     # Log to the specific categorized logger
                     if category_logger_name in loggers: # Check if the logger exists
                         loggers[category_logger_name].log_data(current_sample_loss)
                     else:
                         # This should not happen if initialize_evaluation_loggers is correct
                         print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
-        
-        
+
+
         summary_message_start = f"\n--- Epoch {epoch} ---\n"
         print(summary_message_start)
         f_log.write(summary_message_start)
@@ -733,7 +758,7 @@ def vint_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -753,7 +778,7 @@ def vint_train(
     for i, data in enumerate(tqdm_iter):
         (
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
-            _, # [batch_size, context_size+1, H, W] 
+            _, # [batch_size, context_size+1, H, W]
             action_label,
             _,
             _
@@ -768,7 +793,7 @@ def vint_train(
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
-      
+
         with autocast():
             action_pred, attention_scores = model(obs_image)
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred)
@@ -883,16 +908,16 @@ def vint_evaluate(
                     category_logger_name = 'x_type'
                 else:
                     category_logger_name = 'other_type'
-                
+
                 # Log to the specific categorized logger
                 if category_logger_name in loggers: # Check if the logger exists
                     loggers[category_logger_name].log_data(current_sample_loss)
                 else:
                     # This should not happen if initialize_evaluation_loggers is correct
                     print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
-        
+
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -946,8 +971,8 @@ def compute_cnnaux_loss(
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
-        action_pred[:, -1], 
-        action_label[:, -1], 
+        action_pred[:, -1],
+        action_label[:, -1],
         p=2
     ).mean()
 
@@ -1040,7 +1065,7 @@ def gnmgazeaux_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "auxiliary_loss": auxiliary_loss_logger,
@@ -1062,7 +1087,7 @@ def gnmgazeaux_train(
     for i, data in enumerate(tqdm_iter):
         (
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
-            gaze_attention, # [batch_size, (context_size+1) * H/32 * W/32] 
+            gaze_attention, # [batch_size, (context_size+1) * H/32 * W/32]
             action_label,
             _,
             _
@@ -1082,13 +1107,13 @@ def gnmgazeaux_train(
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
-        
+
         with autocast():
             action_pred, gaze_use_map = model(obs_image)
             losses = compute_cnnaux_loss(
-                action_label=action_label, 
-                action_pred=action_pred, 
-                gaze_map=gaze_attention_flattened, 
+                action_label=action_label,
+                action_pred=action_pred,
+                gaze_map=gaze_attention_flattened,
                 gaze_use_map=gaze_use_map
                 )
             loss = losses["total_loss"]
@@ -1203,14 +1228,14 @@ def gnmgazeaux_evaluate(
                         category_logger_name = 'x_type'
                     else:
                         category_logger_name = 'other_type'
-                    
+
                     # Log to the specific categorized logger
                     if category_logger_name in loggers: # Check if the logger exists
                         loggers[category_logger_name].log_data(current_sample_loss)
                     else:
                         # This should not happen if initialize_evaluation_loggers is correct
                         print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
-        
+
         summary_message_start = f"\n--- Epoch {epoch} ---\n"
         print(summary_message_start)
         f_log.write(summary_message_start)
@@ -1274,7 +1299,7 @@ def gnmpersonaux_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "auxiliary_loss": auxiliary_loss_logger,
@@ -1319,12 +1344,12 @@ def gnmpersonaux_train(
 
         person_masks = person_masks * select_mask.float()  # Zero out invalid masks
         person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
-        
+
         # Pool person_attention to match output size
         output_h = person_attention.shape[2] // 32
         output_w = person_attention.shape[3] // 32
         person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-        
+
         person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
         max_val = person_attention_flattened.max()
         if max_val > 0:
@@ -1335,13 +1360,13 @@ def gnmpersonaux_train(
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
-        
+
         with autocast():
             action_pred, gaze_use_map = model(obs_image)
             losses = compute_cnnaux_loss(
-                action_label=action_label, 
-                action_pred=action_pred, 
-                gaze_map=gaze_map_normalized, 
+                action_label=action_label,
+                action_pred=action_pred,
+                gaze_map=gaze_map_normalized,
                 gaze_use_map=gaze_use_map
                 )
             loss = losses["total_loss"]
@@ -1435,12 +1460,12 @@ def gnmpersonaux_evaluate(
 
                 person_masks = person_masks * select_mask.float()  # Zero out invalid masks
                 person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
-            
+
                 # Pool person_attention to match output size
                 output_h = person_attention.shape[2] // 32
                 output_w = person_attention.shape[3] // 32
                 person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-            
+
                 person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
                 max_val = person_attention_flattened.max()
                 if max_val > 0:
@@ -1473,7 +1498,7 @@ def gnmpersonaux_evaluate(
                         category_logger_name = 'x_type'
                     else:
                         category_logger_name = 'other_type'
-                    
+
                     # Log to the specific categorized logger
                     if category_logger_name in loggers: # Check if the logger exists
                         loggers[category_logger_name].log_data(current_sample_loss)
@@ -1523,7 +1548,7 @@ def compute_aux_loss(
         return unreduced_loss
 
     assert action_pred.shape == action_label.shape, f"{action_pred.shape} != {action_label.shape}"
-    
+
     # MSE Loss
     action_loss = F.mse_loss(action_pred, action_label, reduction="none")
     action_loss_per_sample = action_reduce(action_loss)
@@ -1535,8 +1560,8 @@ def compute_aux_loss(
 
     # Final Displacement Error (FDE)
     fde = F.pairwise_distance(
-        action_pred[:, -1], 
-        action_label[:, -1], 
+        action_pred[:, -1],
+        action_label[:, -1],
         p=2
     ).mean()
 
@@ -1639,7 +1664,7 @@ def gazeaux_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "auxiliary_loss": auxiliary_loss_logger,
@@ -1766,11 +1791,11 @@ def gazeaux_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, gaze_attention, action_label, _, traj_names = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -1814,17 +1839,17 @@ def gazeaux_evaluate(
                     category_logger_name = 'x_type'
                 else:
                     category_logger_name = 'other_type'
-                
+
                 # Log to the specific categorized logger
                 if category_logger_name in loggers: # Check if the logger exists
                     loggers[category_logger_name].log_data(current_sample_loss)
                 else:
                     # This should not happen if initialize_evaluation_loggers is correct
                     print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
-        
+
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -1893,7 +1918,7 @@ def personaux_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "auxiliary_loss": auxiliary_loss_logger,
@@ -1939,12 +1964,12 @@ def personaux_train(
 
         person_masks = person_masks * select_mask.float()  # Zero out invalid masks
         person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
-        
+
         # Pool person_attention to match output size
         output_h = person_attention.shape[2] // 32
         output_w = person_attention.shape[3] // 32
         person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-        
+
         person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
         max_val = person_attention_flattened.max()
         if max_val > 0:
@@ -2039,11 +2064,11 @@ def personaux_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, person_masks, select_labels, action_label, invalid, _, traj_names = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -2061,12 +2086,12 @@ def personaux_evaluate(
 
             person_masks = person_masks * select_mask.float()  # Zero out invalid masks
             person_attention = (person_masks.sum(dim=1) > 0).float()  # [batch_size, context_size+1, H, W]
-        
+
             # Pool person_attention to match output size
             output_h = person_attention.shape[2] // 32
             output_w = person_attention.shape[3] // 32
             person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-        
+
             person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
             max_val = person_attention_flattened.max()
             if max_val > 0:
@@ -2104,7 +2129,7 @@ def personaux_evaluate(
                             category_logger_name = 'x_type'
                         else:
                             category_logger_name = 'other_type'
-                        
+
                         # Log to the specific categorized logger
                         if category_logger_name in loggers: # Check if the logger exists
                             loggers[category_logger_name].log_data(current_sample_loss)
@@ -2114,7 +2139,7 @@ def personaux_evaluate(
 
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -2181,7 +2206,7 @@ def gnmgazechannel_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -2201,7 +2226,7 @@ def gnmgazechannel_train(
     for i, data in enumerate(tqdm_iter):
         (
             obs_image, # [batch_size, 3 * (context_size+1), H, W]
-            gaze_maps, # [batch_size, context_size+1, H, W] 
+            gaze_maps, # [batch_size, context_size+1, H, W]
             action_label,
             _
         ) = data
@@ -2215,7 +2240,7 @@ def gnmgazechannel_train(
         action_label = action_label.to(device)
 
         optimizer.zero_grad()
-    
+
         with autocast():
             action_pred = model(obs_image, gaze_maps)
             losses = compute_baseloss(action_label=action_label, action_pred=action_pred)
@@ -2241,7 +2266,7 @@ def gnmgazechannel_train(
             if key in loggers:
                 logger = loggers[key]
                 logger.log_data(value.item())
-    
+
     # epoch 结束后的总结日志（同时打印并写入文件）
     summary_message_start = f"\n--- Epoch {epoch} ---\n"
     print(summary_message_start)
@@ -2255,8 +2280,8 @@ def gnmgazechannel_train(
         print_log_freq=1,
         log_file=None, # 传递文件句柄
     )
-        
-    
+
+
 def gnmgazechannel_evaluate(
     model: nn.Module,
     dataloader: DataLoader,
@@ -2326,7 +2351,7 @@ def gnmgazechannel_evaluate(
                 for key, value in losses.items():
                     if key in loggers:
                         loggers[key].log_data(value.item())
-        
+
         summary_message_start = f"\n--- Epoch {epoch} 评估总结 ---\n"
         print(summary_message_start)
         f_log.write(summary_message_start)
@@ -2388,7 +2413,7 @@ def gazechannel_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -2498,11 +2523,11 @@ def gazechannel_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, gaze_maps, action_label, _, traj_names = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -2523,7 +2548,7 @@ def gazechannel_evaluate(
                     loggers[key].log_data(value.item())
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -2590,7 +2615,7 @@ def gnmpersonchannel_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -2704,7 +2729,7 @@ def gnmpersonchannel_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     log_file_path = os.path.join(run_folder, "gnmpersonchannel.log") # 评估日志文件名
     os.makedirs(run_folder, exist_ok=True) # 确保 run_folder 存在
 
@@ -2718,7 +2743,7 @@ def gnmpersonchannel_evaluate(
         with torch.no_grad():
             for i, data in enumerate(tqdm_iter):
                 obs_image, person_masks, select_labels, action_label, invalid, _ = data
-        
+
                 viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
                 obs_images = torch.split(obs_image, 3, dim=1)
@@ -2808,7 +2833,7 @@ def personchannel_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -2929,11 +2954,11 @@ def personchannel_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, person_masks, select_labels, action_label, invalid, _ = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -2964,7 +2989,7 @@ def personchannel_evaluate(
                     loggers[key].log_data(value.item())
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -3031,7 +3056,7 @@ def gazetoken_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -3134,11 +3159,11 @@ def gazetoken_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, gaze_maps, action_label, _, traj_names = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -3172,7 +3197,7 @@ def gazetoken_evaluate(
                             category_logger_name = 'x_type'
                         else:
                             category_logger_name = 'other_type'
-                        
+
                         # Log to the specific categorized logger
                         if category_logger_name in loggers: # Check if the logger exists
                             loggers[category_logger_name].log_data(current_sample_loss)
@@ -3182,7 +3207,7 @@ def gazetoken_evaluate(
 
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -3249,7 +3274,7 @@ def persontoken_train(
     fde_logger = Logger("fde", "train", window_size=print_log_freq)
     frechet_logger = Logger("frechet", "train", window_size=print_log_freq)
     hausdorff_logger = Logger("hausdorff", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "action_loss": action_loss_logger,
         "action_waypts_cos_sim": action_waypts_cos_sim_logger,
@@ -3298,7 +3323,7 @@ def persontoken_train(
         output_h = person_attention.shape[2] // 32
         output_w = person_attention.shape[3] // 32
         person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-        
+
         person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
         max_val = person_attention_flattened.max()
         if max_val > 0:
@@ -3381,11 +3406,11 @@ def persontoken_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, person_masks, select_labels, action_label, invalid, _, traj_names = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -3408,7 +3433,7 @@ def persontoken_evaluate(
             output_h = person_attention.shape[2] // 32
             output_w = person_attention.shape[3] // 32
             person_attention_pooled = F.adaptive_avg_pool2d(person_attention, (output_h, output_w))
-        
+
             person_attention_flattened = person_attention_pooled.contiguous().view(person_attention_pooled.shape[0], -1)
             max_val = person_attention_flattened.max()
             if max_val > 0:
@@ -3446,17 +3471,17 @@ def persontoken_evaluate(
                     category_logger_name = 'x_type'
                 else:
                     category_logger_name = 'other_type'
-                
+
                 # Log to the specific categorized logger
                 if category_logger_name in loggers: # Check if the logger exists
                     loggers[category_logger_name].log_data(current_sample_loss)
                 else:
                     # This should not happen if initialize_evaluation_loggers is correct
                     print(f"Warning: Logger for category '{category_logger_name}' not initialized.")
-        
+
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 action_log(
                     i=0,
                     epoch=epoch,
@@ -3526,23 +3551,23 @@ def compute_dumobsloss(
     total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-    precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype) 
-    f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)   
+    precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
 
 
     # Handle padding:
     if pad is not None:
         valid_masks = ~pad # [B, P]
-        
+
         # Mask out loss for padded positions
         masked_select_loss = select_loss * valid_masks.float()
-        
+
         # Count the number of valid elements for averaging
         num_valid_elements = valid_masks.sum().float()
-        
+
         if num_valid_elements > 0:
             total_obs_loss = masked_select_loss.sum() / num_valid_elements
-            
+
             # Calculate correct predictions only for valid elements
             correct_predictions = ((predicted_winners == true_winners) & valid_masks).sum().float()
             accuracy = correct_predictions / num_valid_elements
@@ -3579,7 +3604,7 @@ def compute_dumobsloss(
     else:
         # If no pad is provided, calculate loss and metrics for all elements
         total_obs_loss = select_loss.mean()
-        
+
         correct_predictions = (predicted_winners == true_winners).sum().float()
         accuracy = correct_predictions / true_winners.numel()
 
@@ -3608,8 +3633,8 @@ def compute_dumobsloss(
         "obs_loss": total_obs_loss,
         "accuracy": accuracy,
         "recall": recall,
-        "precision": precision, 
-        "f1_score": f1_score,   
+        "precision": precision,
+        "f1_score": f1_score,
     }
     return results
 
@@ -3655,7 +3680,7 @@ def onephase_train(
     recall_logger = Logger("recall", "train", window_size=print_log_freq)
     precision_logger = Logger("precision", "train", window_size=print_log_freq)
     f1_logger = Logger("f1_score", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "obs_loss": obs_loss_logger,
         "accuracy": accuracy_logger,
@@ -3703,7 +3728,7 @@ def onephase_train(
 
         with autocast():
             logits = model(obs_image, candidates_masks, pad)  # [B, P]
-            
+
             losses = compute_dumobsloss(
             true_winners=true_winners, logits=logits, pad=pad)
             loss = losses["obs_loss"]
@@ -3753,7 +3778,7 @@ def onephase_train(
         # Only calculate if there are both positive and negative samples
         precisions, recalls, _ = precision_recall_curve(all_true_winners_epoch, all_predicted_probs_epoch)
         auc_pr_epoch = auc(recalls, precisions)
-        
+
         print(f"Epoch {epoch} Train AUC-PR: {auc_pr_epoch:.4f}")
         if use_wandb:
             wandb.log({"train_auc_pr": auc_pr_epoch})
@@ -3815,11 +3840,11 @@ def onephase_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, candidates_masks, _, chosen, pad, _= data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -3855,7 +3880,7 @@ def onephase_evaluate(
             viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 obsp_log(
                     i=0,
                     epoch=epoch,
@@ -3880,7 +3905,7 @@ def onephase_evaluate(
     if len(all_true_winners_eval) > 0 and (np.sum(all_true_winners_eval) > 0 and np.sum(1 - np.array(all_true_winners_eval)) > 0):
         precisions, recalls, _ = precision_recall_curve(all_true_winners_eval, all_predicted_probs_eval)
         auc_pr_eval = auc(recalls, precisions)
-        
+
         print(f"Epoch {epoch} Test AUC-PR: {auc_pr_eval:.4f}")
         if use_wandb:
             wandb.log({"test_auc_pr": auc_pr_eval})
@@ -3944,15 +3969,15 @@ def compute_obsloss(
     # --- 2. Auxiliary Attention Map Loss (KLDivLoss) ---
     assert model_attn_map.shape == gt_attn_map.shape, \
         f"Model attention map shape {model_attn_map.shape} != GT attention map shape {gt_attn_map.shape}"
-    
+
     auxiliary_loss = F.kl_div(
-        torch.log(model_attn_map), # Input: log-probabilities
+        torch.log(model_attn_map + 1e-9), # Input: log-probabilities
         gt_attn_map,                         # Target: probabilities
         reduction='batchmean'                # Averages KLDivLoss over the batch
     )
 
     # --- Aggregated Total Loss & Metrics Calculation (with padding handling) ---
-    
+
     # Convert logits to predicted probabilities using sigmoid
     predicted_probs = torch.sigmoid(logits)
     # Convert probabilities to binary predictions using the configurable threshold
@@ -3963,28 +3988,28 @@ def compute_obsloss(
     total_obs_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     accuracy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
     recall = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-    precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype) 
-    f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)   
+    precision = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    f1_score = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
 
 
     # Handle padding:
     if pad is not None:
         valid_masks = ~pad # [B, P]
-        
+
         # Mask out loss for padded positions
         masked_select_loss = select_loss * valid_masks.float()
-        
+
         # Count the number of valid elements for averaging
         num_valid_elements = valid_masks.sum().float()
-        
+
         if num_valid_elements > 0:
             # Average the primary selection loss over valid elements
             primary_loss_mean = masked_select_loss.sum() / num_valid_elements
-            
+
             # Combine primary loss with auxiliary loss
             alpha = 0.5
             total_obs_loss = (1-alpha) * primary_loss_mean + alpha * auxiliary_loss
-            
+
             # Calculate correct predictions only for valid elements
             correct_predictions = ((predicted_winners == true_winners) & valid_masks).sum().float()
             accuracy = correct_predictions / num_valid_elements
@@ -4022,9 +4047,10 @@ def compute_obsloss(
 
     else:
         # If no pad is provided, calculate loss and metrics for all elements
-        primary_loss_mean = select_loss_per_element.mean()
-        total_obs_loss = primary_loss_mean + kl_weight * auxiliary_loss
-        
+        alpha = 0.5
+        primary_loss_mean = select_loss.mean()
+        total_obs_loss = (1 - alpha) * primary_loss_mean + alpha * auxiliary_loss
+
         correct_predictions = (predicted_winners == true_winners).sum().float()
         accuracy = correct_predictions / true_winners.numel()
 
@@ -4055,8 +4081,8 @@ def compute_obsloss(
         "auxiliary_loss_attn": auxiliary_loss, # Separate logging for auxiliary loss
         "accuracy": accuracy,
         "recall": recall,
-        "precision": precision, 
-        "f1_score": f1_score,   
+        "precision": precision,
+        "f1_score": f1_score,
     }
     return results
 
@@ -4104,7 +4130,7 @@ def onephaseplus_train(
     recall_logger = Logger("recall", "train", window_size=print_log_freq)
     precision_logger = Logger("precision", "train", window_size=print_log_freq)
     f1_logger = Logger("f1_score", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "obs_loss": obs_loss_logger,
         "select_loss_primary": select_loss_primary_logger,
@@ -4155,7 +4181,7 @@ def onephaseplus_train(
 
         with autocast():
             logits, obs_attnmaps = model(obs_image, candidates_masks, pad)  # [B, P]
-            
+
             losses = compute_obsloss(
                 true_winners=chosen,
                 logits=logits,
@@ -4210,7 +4236,7 @@ def onephaseplus_train(
         # Only calculate if there are both positive and negative samples
         precisions, recalls, _ = precision_recall_curve(all_true_winners_epoch, all_predicted_probs_epoch)
         auc_pr_epoch = auc(recalls, precisions)
-        
+
         print(f"Epoch {epoch} Train AUC-PR: {auc_pr_epoch:.4f}")
         if use_wandb:
             wandb.log({"train_auc_pr": auc_pr_epoch})
@@ -4274,11 +4300,11 @@ def onephaseplus_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, candidates_masks, act_attnmaps, chosen, pad, _= data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -4316,7 +4342,7 @@ def onephaseplus_evaluate(
             viz_winner_masks = candidates_masks.permute(0, 2, 1, 3, 4).contiguous()  # [batch_size, context_size+1, num_persons, H, W]
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 obsp_log(
                     i=0,
                     epoch=epoch,
@@ -4341,7 +4367,7 @@ def onephaseplus_evaluate(
     if len(all_true_winners_eval) > 0 and (np.sum(all_true_winners_eval) > 0 and np.sum(1 - np.array(all_true_winners_eval)) > 0):
         precisions, recalls, _ = precision_recall_curve(all_true_winners_eval, all_predicted_probs_eval)
         auc_pr_eval = auc(recalls, precisions)
-        
+
         print(f"Epoch {epoch} Test AUC-PR: {auc_pr_eval:.4f}")
         if use_wandb:
             wandb.log({"test_auc_pr": auc_pr_eval})
@@ -4397,12 +4423,12 @@ def compute_dumgazeloss(
 
     # Calculate squared differences across coordinates (x and y)
     # This will be [B, 2] where each column is (pred_x - gt_x)^2 and (pred_y - gt_y)^2
-    squared_diff = (predicted_fixations - gt_fixations)**2 
-    
+    squared_diff = (predicted_fixations - gt_fixations)**2
+
     # Sum squared differences across x and y coordinates (dim=1 for [B, 2] shape),
     # then take sqrt for Euclidean distance for each sample
     # Resulting shape: [B] (each element is the Euclidean distance for one sample)
-    per_sample_euclidean_distance = torch.sqrt(squared_diff.sum(dim=1)) 
+    per_sample_euclidean_distance = torch.sqrt(squared_diff.sum(dim=1))
 
     # Calculate RMSE (Root Mean Squared Error) - The average Euclidean distance across the batch
     rmse = per_sample_euclidean_distance.mean() # Scalar
@@ -4426,7 +4452,7 @@ def render_fixations_to_gaze_maps(
     sigma: float, # 高斯核的标准差
     device: torch.device # 运行设备
 ) -> torch.Tensor: # 返回: [B, C, H, W]
-    
+
     B, C, _ = fixations_batch.shape
     gaze_maps_batch = torch.zeros((B, C, H, W), dtype=torch.float32, device=device)
 
@@ -4447,15 +4473,15 @@ def render_fixations_to_gaze_maps(
             if 0 <= fx_int < W and 0 <= fy_int < H:
                 # 生成 2D 高斯核，中心在 (fx_int, fy_int)
                 gaussian = torch.exp(-((x_grid - fx_int)**2 + (y_grid - fy_int)**2) / (2 * sigma**2))
-                
+
                 # 归一化高斯核，使其最大值为 1
                 if gaussian.max() > 0:
-                    gaussian = gaussian / gaussian.max() 
-                
+                    gaussian = gaussian / gaussian.max()
+
                 # 将生成的 Gaze Map 赋值到对应的位置
                 gaze_maps_batch[b, c, :, :] = gaussian
             # 如果坐标无效，对应的 gaze_map_batch[b, c, :, :] 保持为零（由初始化保证）
-            
+
     return gaze_maps_batch
 
 
@@ -4498,7 +4524,7 @@ def gaze_train(
     fixation_loss_mse_logger = Logger("fixation_loss_mse", "train", window_size=print_log_freq)
     rmse_logger = Logger("rmse", "train", window_size=print_log_freq)
     mae_logger = Logger("mae", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "fixation_loss_mse": fixation_loss_mse_logger,
         "rmse": rmse_logger,
@@ -4538,12 +4564,12 @@ def gaze_train(
             sigma=10.0, # 使用传入的高斯核标准差
             device=device
         )
-        
+
         optimizer.zero_grad()
 
         with autocast():
             predicted_fixation, obs_attnmaps = model(obs_image, prev_gaze_maps_for_model)  # [B, P]
-            
+
             losses = compute_dumgazeloss(
                 predicted_fixations= predicted_fixation, gt_fixations=fixations[:, -1, :])
             loss = losses["fixation_loss_mse"]
@@ -4613,11 +4639,11 @@ def gaze_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, fixations, _, _, _ = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -4635,7 +4661,7 @@ def gaze_evaluate(
                 sigma=10.0, # 使用传入的高斯核标准差
                 device=device
             )
-            
+
             # 前向推理
             predicted_fixation, obs_attnmaps = model(obs_image, prev_gaze_maps_for_model)  # [B, P]
 
@@ -4645,7 +4671,7 @@ def gaze_evaluate(
                     loggers[key].log_data(value.item())
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 gaze_log(
                     i=0,
                     epoch=epoch,
@@ -4697,20 +4723,20 @@ def compute_gazeloss(
         f"Predicted fixations shape {predicted_fixations.shape} != GT fixations shape {gt_fixations.shape}"
     assert predicted_fixations.ndim == 2 and predicted_fixations.shape[1] == 2, \
         f"Input fixations must be of shape [B, 2], but got {predicted_fixations.shape}"
-    
+
     # Calculate Mean Squared Error (MSE) per batch element
     main_fixation_loss = F.mse_loss(predicted_fixations, gt_fixations, reduction='mean') # Scalar loss
 
     # --- 2. Auxiliary Attention Map Loss (KLDivLoss) ---
     assert model_attn_map.shape == gt_attn_map.shape, \
         f"Model attention map shape {model_attn_map.shape} != GT attention map shape {gt_attn_map.shape}"
-    
+
     # KLDivLoss requires log-probabilities for the input and probabilities for the target.
     # model_attn_map is already softmaxed (probabilities), so we need to apply torch.log.
     # gt_attn_map is also probabilities.
     auxiliary_attn_loss = F.kl_div(
         torch.log(model_attn_map + 1e-9), # Add a small epsilon for numerical stability with log(0)
-        gt_attn_map,                      
+        gt_attn_map,
         reduction='batchmean'             # Averages KLDivLoss over the batch
     )
 
@@ -4721,7 +4747,7 @@ def compute_gazeloss(
     # --- Metrics for Regression ---
     # RMSE: Root Mean Squared Error (spatial distance)
     # MAE: Mean Absolute Error (spatial distance)
-    
+
     # Calculate squared differences (already done by MSE internally, but we need it per element for RMSE)
     squared_diff = (predicted_fixations - gt_fixations)**2 # [B, 2]
     # Sum squared differences across x and y coordinates, then take sqrt for Euclidean distance
@@ -4784,7 +4810,7 @@ def gazeplus_train(
     auxiliary_loss_attn_logger = Logger("auxiliary_loss_attn", "train", window_size=print_log_freq)
     rmse_logger = Logger("rmse", "train", window_size=print_log_freq)
     mae_logger = Logger("mae", "train", window_size=print_log_freq)
-    
+
     loggers = {
         "obs_loss": obs_loss_logger,
         "fixation_loss_mse": fixation_loss_mse_logger,
@@ -4827,12 +4853,12 @@ def gazeplus_train(
                 sigma=10.0, # 使用传入的高斯核标准差
                 device=device
             )
-        
+
         optimizer.zero_grad()
 
         with autocast():
             predicted_fixation, obs_attnmaps = model(obs_image, prev_gaze_maps_for_model)  # [B, P]
-            
+
             losses = compute_gazeloss(
                 predicted_fixations= predicted_fixation,
                 gt_fixations=fixations[:, -1, :],
@@ -4908,11 +4934,11 @@ def gazeplus_evaluate(
         dynamic_ncols=True,
         desc=f"Evaluating for epoch {epoch}",
     )
-    
+
     with torch.no_grad():
         for i, data in enumerate(tqdm_iter):
             obs_image, fixations, _, act_attnmaps, _ = data
-    
+
             viz_obs_images = obs_image.view(obs_image.shape[0], -1, 3, obs_image.shape[2], obs_image.shape[3])
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -4941,7 +4967,7 @@ def gazeplus_evaluate(
                     loggers[key].log_data(value.item())
 
             # 只对最后一个batch进行可视化
-            if i == num_batches - 1: 
+            if i == num_batches - 1:
                 gaze_log(
                     i=0,
                     epoch=epoch,

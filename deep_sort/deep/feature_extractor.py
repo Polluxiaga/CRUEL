@@ -1,3 +1,5 @@
+"""ReID feature extractor used by the DeepSORT wrapper."""
+
 import torch
 import torchvision.transforms as transforms
 import numpy as np
@@ -8,6 +10,8 @@ from .model import Net
 
 
 class Extractor(object):
+    """Load the ReID network and produce appearance embeddings for crops."""
+
     def __init__(self, model_path, use_cuda=True):
         self.net = Net(reid=True)
         # self.net = resnet18(reid=True)
@@ -24,14 +28,7 @@ class Extractor(object):
         ])
 
     def _preprocess(self, im_crops):
-        """
-        TODO:
-            1. to float with scale from 0 to 1
-            2. resize to (64, 128) as Market1501 dataset did
-            3. concatenate to a numpy array
-            3. to torch Tensor
-            4. normalize
-        """
+        """Resize, scale, tensorize, and normalize crops for the ReID network."""
 
         def _resize(im, size):
             return cv2.resize(im.astype(np.float32) / 255., size)
@@ -40,6 +37,7 @@ class Extractor(object):
         return im_batch
 
     def __call__(self, im_crops):
+        """Return one appearance embedding per input crop."""
         im_batch = self._preprocess(im_crops)
         with torch.no_grad():
             im_batch = im_batch.to(self.device)

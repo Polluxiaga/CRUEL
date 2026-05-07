@@ -1,3 +1,5 @@
+"""Small data-loading helpers shared by Gaze2Nav datasets and visualizers."""
+
 import numpy as np
 import os
 from PIL import Image
@@ -9,10 +11,10 @@ from typing import Union
 
 def ts2np(tensor):
     """Convert tensor, list of tensors, or numpy array to numpy array.
-    
+
     Args:
         tensor: torch.Tensor, list of torch.Tensor, or np.ndarray
-        
+
     Returns:
         np.ndarray: Converted numpy array
     """
@@ -27,10 +29,13 @@ def ts2np(tensor):
 
 
 def get_data_path(data_folder: str, f: str, time: int, data_type: str = "image"):
+    """Build a path to a frame-level data artifact inside a trajectory folder."""
     data_ext = {
         "image": ".jpg",
         # add more data types here
     }
+    if data_type not in data_ext:
+        raise ValueError(f"Unsupported data_type '{data_type}'. Known types: {sorted(data_ext)}")
     return os.path.join(data_folder, f, f"{str(time)}{data_ext[data_type]}")
 
 

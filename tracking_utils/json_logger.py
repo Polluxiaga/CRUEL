@@ -1,4 +1,8 @@
-"""
+"""JSON logging utilities for frame-by-frame detection outputs.
+
+This module is not on the main Gaze2Nav training path, but it is useful for
+debugging detector/tracker outputs in a structured format.
+
 References:
     https://medium.com/analytics-vidhya/creating-a-custom-logging-mechanism-for-real-time-object-detection-using-tdd-4ca2cfcd0a2f
 """
@@ -120,7 +124,7 @@ class Frame(BaseJsonLogger):
             raise ValueError("Frame with id: {} already has a Bbox with id: {}".format(self.frame_id, bbox_id))
 
     def add_label_to_bbox(self, bbox_id: int, category: str, confidence: float):
-        bboxes = {bbox.id: bbox for bbox in self.bboxes}
+        bboxes = {bbox.bbox_id: bbox for bbox in self.bboxes}
         if bbox_id in bboxes.keys():
             res = bboxes.get(bbox_id)
             res.add_label(category, confidence)
@@ -138,7 +142,7 @@ class BboxToJsonLogger(BaseJsonLogger):
             "frame_width": 1920,
             "frame_height": 1080,
             "frame_rate": 20,
-            "video_name": "/home/gpu/codes/MSD/pedestrian_2/project/public/camera1.avi"
+            "video_name": "camera1.avi"
           },
           "frames": [
             {
@@ -174,8 +178,7 @@ class BboxToJsonLogger(BaseJsonLogger):
 
     def __init__(self, top_k_labels: int = 1):
         self.frames = {}
-        self.video_details = self.video_details = dict(frame_width=None, frame_height=None, frame_rate=None,
-                                                       video_name=None)
+        self.video_details = dict(frame_width=None, frame_height=None, frame_rate=None, video_name=None)
         self.top_k_labels = top_k_labels
         self.start_time = datetime.now()
 
@@ -363,7 +366,14 @@ class BboxToJsonLogger(BaseJsonLogger):
         :param output_dir:
         :return:
         """
-        pass
+        if frames_quota <= 0:
+            return
+        if frame_counter > 0 and frame_counter % frames_quota == 0:
+            if not exists(output_dir):
+                makedirs(output_dir)
+            output_name = f"{frame_counter:08d}.json"
+            self.json_output(output_name=join(output_dir, output_name))
+            self.frames = {}
 
     def flush(self, output_dir):
         """
@@ -379,5 +389,7 @@ class BboxToJsonLogger(BaseJsonLogger):
 
         """
         filename = self.start_time.strftime('%Y-%m-%d %H-%M-%S') + '-remaining.json'
+        if not exists(output_dir):
+            makedirs(output_dir)
         output = join(output_dir, filename)
         self.json_output(output_name=output)

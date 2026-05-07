@@ -1,3 +1,9 @@
+"""Project-level wrapper around the original DeepSORT tracker.
+
+This class connects detector outputs to the DeepSORT appearance model and keeps
+the optional segmentation masks attached to each track for Gaze2Nav preprocessing.
+"""
+
 import numpy as np
 import torch
 
@@ -11,6 +17,8 @@ __all__ = ['DeepSort']
 
 
 class DeepSort(object):
+    """Track detections across frames and preserve class IDs and masks."""
+
     def __init__(self, model_path, max_dist=0.2, min_confidence=0.3, nms_max_overlap=1.0,
                  max_iou_distance=0.7, max_age=70, n_init=3, nn_budget=100, use_cuda=True):
         self.min_confidence = min_confidence
@@ -23,6 +31,7 @@ class DeepSort(object):
         self.tracker = Tracker(metric, max_iou_distance=max_iou_distance, max_age=max_age, n_init=n_init)
 
     def update(self, bbox_xywh, confidences, classes, ori_img, masks=None):
+        """Update tracks from detector boxes in ``center x/y, width, height`` format."""
         self.height, self.width = ori_img.shape[:2]
         # generate detections
         features = self._get_features(bbox_xywh, ori_img)
@@ -56,20 +65,26 @@ class DeepSort(object):
                 mask_outputs.append(track.mask)
         if len(outputs) > 0:
             outputs = np.stack(outputs, axis=0)
+        else:
+            outputs = np.empty((0, 6), dtype=np.int32)
         return outputs, mask_outputs
 
 
     @staticmethod
     def _xywh_to_tlwh(bbox_xywh):
+        """Convert center-format boxes to top-left-width-height boxes."""
         if isinstance(bbox_xywh, np.ndarray):
             bbox_tlwh = bbox_xywh.copy()
         elif isinstance(bbox_xywh, torch.Tensor):
             bbox_tlwh = bbox_xywh.clone()
+        else:
+            raise TypeError(f"Unsupported bbox type: {type(bbox_xywh)}")
         bbox_tlwh[:, 0] = bbox_xywh[:, 0] - bbox_xywh[:, 2] / 2.
         bbox_tlwh[:, 1] = bbox_xywh[:, 1] - bbox_xywh[:, 3] / 2.
         return bbox_tlwh
 
     def _xywh_to_xyxy(self, bbox_xywh):
+        """Convert one center-format box to clipped corner coordinates."""
         x, y, w, h = bbox_xywh
         x1 = max(int(x - w / 2), 0)
         x2 = min(int(x + w / 2), self.width - 1)
@@ -78,6 +93,7 @@ class DeepSort(object):
         return x1, y1, x2, y2
 
     def _tlwh_to_xyxy(self, bbox_tlwh):
+        """Convert one top-left-width-height box to clipped corner coordinates."""
         x, y, w, h = bbox_tlwh
         x1 = max(int(x), 0)
         x2 = min(int(x + w), self.width - 1)
@@ -87,6 +103,7 @@ class DeepSort(object):
 
     @staticmethod
     def _xyxy_to_tlwh(bbox_xyxy):
+        """Convert one corner-format box to top-left-width-height."""
         x1, y1, x2, y2 = bbox_xyxy
 
         t = x1
@@ -96,6 +113,7 @@ class DeepSort(object):
         return t, l, w, h
 
     def _get_features(self, bbox_xywh, ori_img):
+        """Crop detections and run the ReID feature extractor."""
         im_crops = []
         for box in bbox_xywh:
             x1, y1, x2, y2 = self._xywh_to_xyxy(box)

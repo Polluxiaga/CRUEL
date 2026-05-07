@@ -1,15 +1,18 @@
+"""Visualize selected-person masks by overlaying them on original frames."""
+
 import pickle
 import sys
 import os
+import argparse
 import numpy as np
 from PIL import Image
 import pandas as pd
 
 # --- Configuration ---
 # IMPORTANT: Set your image dimensions here for correct pixel mapping.
-# If a 160x120 image was flattened, IMAGE_WIDTH should be 160, IMAGE_HEIGHT should be 120.
+# If a 160x128 image was flattened, IMAGE_WIDTH should be 160, IMAGE_HEIGHT should be 128.
 IMAGE_WIDTH = 160
-IMAGE_HEIGHT = 120
+IMAGE_HEIGHT = 128
 # --- End Configuration ---
 
 # Importance safety warning: Do not load pickle files from unknown or untrusted sources!
@@ -92,7 +95,7 @@ def process_pickle_and_apply_masks(filepath, data_folder, image_width, image_hei
                         # It should already be unique and sorted as per the generation script,
                         # but we can deduplicate again defensively if needed.
                         unique_row_list = list(set(row_list)) # Deduplicate just in case
-                        
+
                         processed_rows.append(unique_row_list)
 
                     print(f"  Processing complete. {len(processed_rows)} rows of data to process.")
@@ -239,11 +242,12 @@ def process_pickle_and_apply_masks(filepath, data_folder, image_width, image_hei
 
 
 if __name__ == "__main__":
-    # === CONFIGURE YOUR ROOT DIRECTORY HERE ===
-    # This should be the main folder containing all your subfolders (e.g., 't/subfolder1', 't/subfolder2')
-    root_directory = '/your_folder/data_vis' # <<< DOUBLE-CHECK AND CHANGE THIS PATH!
+    parser = argparse.ArgumentParser(description="Overlay selected-person masks on trajectory frames.")
+    parser.add_argument("--root", default="data_vis", help="Root folder containing trajectory subfolders.")
+    args = parser.parse_args()
+    root_directory = args.root
 
-    print("--- ⚠️⚠️⚠️ WARNING: THIS SCRIPT WILL OVERWRITE YOUR ORIGINAL JPG FILES. ⚠️⚠️⚠️ ---")
+    print("--- WARNING: THIS SCRIPT WILL OVERWRITE YOUR ORIGINAL JPG FILES. ---")
     print("--- PLEASE BACK UP YOUR DATA BEFORE PROCEEDING. ---")
     input("Press Enter to continue, or Ctrl+C to abort.")
 

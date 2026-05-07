@@ -1,17 +1,23 @@
+"""Read and write simple MOT/KITTI-style tracking result files."""
+
 import os
-from typing import Dict
 import numpy as np
 
 # from utils.log import get_logger
 
 
 def write_results(filename, results, data_type):
+    """Write tracker outputs as MOT or KITTI text rows."""
     if data_type == 'mot':
         save_format = '{frame},{id},{cls},{x1},{y1},{w},{h},-1,-1,-1,-1\n'
     elif data_type == 'kitti':
         save_format = '{frame} {id} pedestrian 0 0 -10 {x1} {y1} {x2} {y2} -10 -10 -10 -1000 -1000 -1000 -10\n'
     else:
         raise ValueError(data_type)
+
+    output_dir = os.path.dirname(filename)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     with open(filename, 'w') as f:
         for frame_id, tlwhs, track_ids, classes in results:
@@ -55,6 +61,7 @@ def write_results(filename, results, data_type):
 
 
 def read_results(filename, data_type: str, is_gt=False, is_ignore=False):
+    """Read tracking results into ``frame_id -> [(tlwh, id, score), ...]``."""
     if data_type in ('mot', 'lab'):
         read_fun = read_mot_results
     else:
@@ -82,6 +89,7 @@ labels={'ped', ...			% 1
 
 
 def read_mot_results(filename, is_gt, is_ignore):
+    """Read MOT-format result, ground-truth, or ignore-region files."""
     valid_labels = {1}
     ignore_labels = {2, 7, 8, 12}
     results_dict = dict()
@@ -124,6 +132,7 @@ def read_mot_results(filename, is_gt, is_ignore):
 
 
 def unzip_objs(objs):
+    """Split a list of ``(tlwh, id, score)`` tuples into aligned arrays."""
     if len(objs) > 0:
         tlwhs, ids, scores = zip(*objs)
     else:

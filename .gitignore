@@ -1,4 +1,5 @@
 my_logs/*
+logs/
 wandb/*
 manual_gaze_csv/*
 debugdata/*
@@ -14,8 +15,17 @@ data_splits/*
 *.png
 *.jpg
 *.pth
+*.pt
+*.pkl
+*.lmdb
+*.ckpt
 *.mp4
 *.gif
+
+checkpoints/
+weights/
+runs/
+outputs/
 
 __pycache__/
 .DS_Store

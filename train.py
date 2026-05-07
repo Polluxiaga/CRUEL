@@ -1,6 +1,12 @@
+"""Training and generation entrypoint for the Gaze2Nav pipeline.
+
+The script follows the paper's staged workflow: predict gaze/winner labels,
+derive semantic saliency artifacts, then train RGB/gaze/person-aware action
+planners for egocentric social navigation.
+"""
+
 import os
-from typing import Optional, Dict, List, Tuple
-import torch.nn.functional as F
+from typing import Dict, Tuple
 import argparse
 import tqdm
 import yaml
@@ -9,7 +15,7 @@ import numpy as np
 import time
 
 # 解析命令行参数
-parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
+parser = argparse.ArgumentParser(description="Gaze2Nav training and artifact generation")
 parser.add_argument("--config", "-c", default="configs/vint_config.yaml", help="Path to config file")
 args = parser.parse_args()
 
@@ -30,17 +36,61 @@ if "gpu_id" in config:
 # 现在导入PyTorch及相关模块
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim import Adam, AdamW
 from torchvision import transforms
 import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
-from my_data.my_dataset import ObsDataset, ActDataset
-from my_model.act_models import vint_model, channel_model, catoken_model, gnm_model, gnmchannel_model
-from my_model.observe_models import WinnerSelectorPlus, GazePredictorPlus
-from my_training.my_train_utils import act_person_collate_fn, obs_person_collate_fn, act_base_collate_fn, obs_base_collate_fn, render_fixations_to_gaze_maps
-from my_training.my_train_eval_loop import train_eval_loop, load_model, count_parameters
+from gaze2nav.data.datasets import ObsDataset, ActDataset
+from gaze2nav.models.action_models import vint_model, channel_model, catoken_model, gnm_model, gnmchannel_model
+from gaze2nav.models.gaze_models import WinnerSelectorPlus, GazePredictorPlus
+from gaze2nav.training.training_utils import (
+    act_person_collate_fn,
+    obs_person_collate_fn,
+    act_base_collate_fn,
+    obs_base_collate_fn,
+    render_fixations_to_gaze_maps,
+)
+from gaze2nav.training.training_loop import train_eval_loop, load_model, count_parameters
+
+
+OBS_METHODS = {"1phase", "1phaseplus", "gaze", "gazeplus"}
+PERSON_ACT_METHODS = {"gnmpersonaux", "gnmpersonchannel", "personaux", "personchannel", "persontoken"}
+
+
+def _split_artifact_path(config: dict, split: str, filename: str) -> str:
+    """Return an artifact path inside the configured train/test split folder."""
+    return os.path.join(config["datasets"]["data"][split], filename)
+
+
+def _image_hw(config: dict) -> Tuple[int, int]:
+    """Read image size from config as (height, width)."""
+    width, height = config["image_size"]
+    return height, width
+
+
+def _initialize_lazy_modules(model: nn.Module, method_type: str, config: dict, device: torch.device) -> None:
+    """Materialize lazily-created action decoders before building the optimizer."""
+    if not hasattr(model, "decoder") or getattr(model, "decoder") is not None:
+        return
+
+    height, width = _image_hw(config)
+    num_frames = config["context_size"] + 1
+    dummy_obs = torch.zeros(1, num_frames * 3, height, width, device=device)
+    dummy_attention = torch.zeros(1, num_frames, height, width, device=device)
+
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        if method_type in {"gazechannel", "personchannel", "gnmgazechannel", "gnmpersonchannel"}:
+            model(dummy_obs, dummy_attention)
+        elif method_type in {"gazetoken", "persontoken"}:
+            model(dummy_obs, dummy_attention)
+        elif method_type in {"vint", "cnnaux", "gazeaux", "personaux"}:
+            model(dummy_obs)
+    model.train(was_training)
 
 
 def generate_attnmap(
@@ -62,12 +112,12 @@ def generate_attnmap(
     """
 
     model.eval() # Set model to evaluation mode
-    
+
     total_samples = len(dataloader.dataset)
     # Initialize list to store attention maps in original dataset order
     # Each element will be a tensor of shape (N * spatial_flatten_len)
-    all_unpadded_rgb_attention_maps = [None] * total_samples 
-    
+    all_unpadded_rgb_attention_maps = [None] * total_samples
+
     # We need to determine H_feature * W_feature from the model's structure
     # A safer way is to infer it or pass it. Let's infer during the first batch.
     H_feature_val = None
@@ -101,7 +151,7 @@ def generate_attnmap(
             select_mask = select_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
 
             person_masks = person_masks * select_mask.float()
-            person_attention = (person_masks.sum(dim=1) > 0).float() 
+            person_attention = (person_masks.sum(dim=1) > 0).float()
 
             # --- Infer spatial_flatten_len and N_frames_val if not already done ---
             if spatial_flatten_len_val is None:
@@ -111,7 +161,7 @@ def generate_attnmap(
                 H_feature_val = sample_features.shape[2]
                 W_feature_val = sample_features.shape[3]
                 spatial_flatten_len_val = H_feature_val * W_feature_val
-                
+
                 # Infer N (number of frames) from input image channels / 3
                 N_frames_val = obs_image.shape[1] // 3
                 if N_frames_val != (model.context_size + 1):
@@ -121,12 +171,12 @@ def generate_attnmap(
             # attention_scores shape: (B, total_seq_len, total_seq_len)
             # where total_seq_len = N * spatial_flatten_len (RGB) + N * spatial_flatten_len (Attention)
             _, attention_scores_from_act_model = model(obs_image, person_attention)
-            
+
             # --- Extract RGB-only Attention Map from the returned attention_scores ---
             # The length of the RGB token sequence in the decoder's input
             # The first half of the sequence for both queries and keys.
             rgb_token_segment_length = N_frames_val * spatial_flatten_len_val
-            
+
             attn_to_rgb_tokens = attention_scores_from_act_model[:, :, :rgb_token_segment_length]  # Shape: (B, total_seq_len, rgb_token_segment_length)
 
             # Sum attention across the query dimension (dim=1) to get total attention received by each RGB key token.
@@ -134,20 +184,20 @@ def generate_attnmap(
 
             # Softmax normalize this sequence to get a probability distribution over the RGB tokens.
             normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1)
-            
+
             # Iterate through each sample in the current batch
             for i_sample_in_batch in range(normalized_rgb_attention_sequence.shape[0]):
                 original_dataset_idx = original_indices_list[i_sample_in_batch]
-                
+
                 single_sample_attn_map = normalized_rgb_attention_sequence[i_sample_in_batch].cpu()
                 all_unpadded_rgb_attention_maps[original_dataset_idx] = single_sample_attn_map
-    
+
     # Save the generated attention maps to disk
     output_name = "attnmap_used.pt"
     full_save_path = os.path.join(save_path, output_name)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure directory exists
+    os.makedirs(save_path, exist_ok=True)
     torch.save(all_unpadded_rgb_attention_maps, full_save_path)
-    print(f"Generated {output_name} saved to: {save_path}")
+    print(f"Generated {output_name} saved to: {full_save_path}")
 
 
 def generate_gaze(
@@ -177,7 +227,7 @@ def generate_gaze(
         sigma (float): Standard deviation for the Gaussian kernel.
     """
     model.eval() # Set model to evaluation mode for prediction
-    
+
     # Store generated gaze maps as { (traj_name, curr_time): single_predicted_gaze_map_tensor }
     # This will be used by ActDataset to look up individual predicted gaze maps.
     all_generated_gaze_maps_individual: Dict[Tuple[str, int], torch.Tensor] = {}
@@ -188,10 +238,10 @@ def generate_gaze(
     y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
 
     tqdm_iter = tqdm.tqdm(dataloader, desc=f"Generating {method} Individual Gaze Maps", dynamic_ncols=True)
-    
+
     # Access the dataset instance to get trajectory names and current times
     dataset_instance = dataloader.dataset
-    
+
     # 检查是否是 ConcatDataset
     if isinstance(dataset_instance, torch.utils.data.ConcatDataset):
         print("Detected ConcatDataset. Building combined samples_index from constituent datasets.")
@@ -219,11 +269,11 @@ def generate_gaze(
         for batch_data in tqdm_iter:
             # Unpack the batched data based on ActDataset __getitem__ return:
             # (obs_images_N_frames_stacked, gaze_maps_all_N_frames_gt, person_masks, winner_labels_to_return, actions, original_indices_batch)
-            obs_images_N_frames_stacked, fixations_all_N_frames_gt, _, _, original_indices_batch = batch_data 
-            
+            obs_images_N_frames_stacked, fixations_all_N_frames_gt, _, _, original_indices_batch = batch_data
+
             # Move data to device
             obs_images_N_frames_stacked = obs_images_N_frames_stacked.to(device) # [B, (N_frames)*3, H, W]
-            
+
             fixations_all_N_frames_gt = fixations_all_N_frames_gt.to(device)
             prev_fixation = fixations_all_N_frames_gt[:, :-1, :]  # [B, C, 2] - previous fixations
 
@@ -241,20 +291,20 @@ def generate_gaze(
 
             for i_sample_in_batch in range(predicted_fixations_current_frame_batch.shape[0]):
                 original_dataset_idx = original_indices_batch[i_sample_in_batch].item() # Get as scalar int
-                
+
                 # Retrieve (traj_name, curr_time) for this specific sample
                 traj_name, curr_time = effective_samples_index[original_dataset_idx]
-                
+
                 # Create empty gaze map for this specific current frame prediction
                 single_predicted_gaze_map = torch.zeros((1, H, W), dtype=torch.float32, device=device)
-                
-                fx, fy = predicted_fixations_current_frame_batch[i_sample_in_batch].detach().cpu().numpy() 
+
+                fx, fy = predicted_fixations_current_frame_batch[i_sample_in_batch].detach().cpu().numpy()
 
                 # Ensure fixation is valid numbers and within bounds
                 if not (np.isnan(fx) or np.isnan(fy)):
                     fx_int = round(float(fx))
                     fy_int = round(float(fy))
-                    
+
                     if 0 <= fx_int < W and 0 <= fy_int < H:
                         gaussian = torch.exp(-((x_grid - fx_int)**2 + (y_grid - fy_int)**2) / (2 * sigma**2))
                         if gaussian.max() > 0:
@@ -263,18 +313,18 @@ def generate_gaze(
 
                 # Store the generated single-frame gaze map with its (traj_name, curr_time) key
                 all_generated_gaze_maps_individual[(traj_name, curr_time)] = single_predicted_gaze_map.cpu()
-    
+
     underlying_datasets = dataloader.dataset.datasets if isinstance(dataloader.dataset, torch.utils.data.ConcatDataset) else [dataloader.dataset]
 
     print("\nPopulating initial context frames with GT gaze maps...")
     num_added_gt = 0
-    
+
     # 使用 tqdm 包装外部循环，提供进度条
     for ds_idx, ds in enumerate(tqdm.tqdm(underlying_datasets, desc="Processing underlying datasets for GT fill")):
         if not hasattr(ds, 'samples_index') or not hasattr(ds, '_get_trajectory') or not hasattr(ds, '_load_gazemaps'):
             print(f"Warning: Underlying dataset {type(ds)} (index {ds_idx}) does not support required methods (_get_trajectory, _load_gazemaps) for GT fill. Skipping.")
             continue
-        
+
         # 收集该数据集实例中所有唯一的轨迹名称
         unique_traj_names_in_ds = sorted(list(set(item[0] for item in ds.samples_index)))
 
@@ -282,32 +332,32 @@ def generate_gaze(
             try:
                 # 获取该轨迹的总长度，以确保不会访问越界的帧
                 # 假设 _get_trajectory(traj_name) 能返回一个可获取长度的数据结构
-                traj_data = ds._get_trajectory(traj_name) 
+                traj_data = ds._get_trajectory(traj_name)
                 traj_len = len(traj_data)
             except Exception as e:
                 print(f"Warning: Could not get trajectory length for {traj_name} from dataset {type(ds)}. Error: {e}. Skipping GT fill for this trajectory.")
                 continue
 
-            for t in range(min(context_size, traj_len)): 
+            for t in range(min(context_size, traj_len)):
                 key = (traj_name, t)
-                
+
                 # 检查该键是否已经存在于字典中（理论上不应存在，因为这些 t < context_size）
                 if key not in all_generated_gaze_maps_individual:
                     try:
                         # 从该数据集实例加载地面真实注视图
-                        gt_gaze_map = ds._load_gazemaps(traj_name, t).cpu() 
+                        gt_gaze_map = ds._load_gazemaps(traj_name, t).cpu()
                         all_generated_gaze_maps_individual[key] = gt_gaze_map
                         num_added_gt += 1
                     except Exception as e:
                         print(f"Warning: Failed to load GT gaze map for {key}. Error: {e}. Skipping this frame.")
-    
+
     print(f"Added {num_added_gt} GT gaze maps for initial context frames (t < {context_size}).")
 
     # Save the generated predictions to disk
     output_filename = f"{method}.pt" # Example: "gaze.pt"
     full_save_file_path = os.path.join(save_path, output_filename)
     os.makedirs(save_path, exist_ok=True)
-    
+
     torch.save(all_generated_gaze_maps_individual, full_save_file_path)
     print(f"Individual predicted gaze maps saved to: {full_save_file_path}")
 
@@ -335,16 +385,16 @@ def generate_1phase_winners(
                          Example: "data_splits/train/1phase_winners.pt", "data_splits/train/1phaseplus_winners.pt"
     """
     model.eval() # Set model to evaluation mode for prediction
-    
+
     total_samples = len(dataloader.dataset)
     all_unpadded_predictions = [None] * total_samples # Initialize list to store results in original dataset order
-    
+
     with torch.no_grad():
         tqdm_iter = tqdm.tqdm(dataloader, desc=f"Generating {method} Winners", dynamic_ncols=True)
         for batch_data in tqdm_iter:
             # Unpack the batched data from obs_person_collate_fn
             obs_batch, mask_batch, attnmap_batch, _, invalid_flag_batch, original_indices_batch = batch_data
-            
+
             # Move tensors to device
             obs_batch = obs_batch.to(device)
             mask_batch = mask_batch.to(device)
@@ -355,30 +405,30 @@ def generate_1phase_winners(
             logits, _ = model(obs_batch, mask_batch, invalid_flag_batch) # (B, P_max)
 
             batched_preds_bool = (logits > 0).cpu().bool() # Convert logits to boolean predictions (B, P_max)
-            
+
             # Iterate through each sample in the current batch
             for i_sample_in_batch in range(batched_preds_bool.shape[0]):
                 original_dataset_idx = original_indices_list[i_sample_in_batch]
-                
+
                 # Extract the unpadded prediction for this sample
                 # Use invalid_flag_batch to mask out padded persons
                 unpadded_pred = batched_preds_bool[i_sample_in_batch, ~invalid_flag_batch[i_sample_in_batch]] # (P_actual,)
-                
+
                 # Store the unpadded prediction in the master list at its original index
                 all_unpadded_predictions[original_dataset_idx] = unpadded_pred
-                
+
     # Save the generated predictions to disk
     output_name = f"{method}.pt"
     full_save_path = os.path.join(save_path, output_name)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True) # Ensure directory exists
+    os.makedirs(save_path, exist_ok=True)
     torch.save(all_unpadded_predictions, full_save_path)
-    print(f"Generated {output_name} saved to: {save_path}")
+    print(f"Generated {output_name} saved to: {full_save_path}")
     if len(all_unpadded_predictions) > 0:
         print(f"Example cached prediction shape (first sample): {all_unpadded_predictions[0].shape}")
 
 
 def create_model_and_optimizer(method_type, config, device, lr, model_type="act_model", model_instance=None):
-    """Helper function to create a model and its optimizer/scheduler."""
+    """Create the requested model together with its optimizer and scheduler."""
     model = model_instance
     if model is None:
         if model_type == "obs_model":
@@ -425,24 +475,28 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
                     mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 ).to(device)
             elif method_type in ["gnm", "gnmgazeaux", "gnmpersonaux"]:
-                model = gnm_model( 
+                model = gnm_model(
                     method=method_type,
                     context_size=config["context_size"],
                     len_traj_pred=config["len_traj_pred"],
                     encoding_size=config["encoding_size"],
                 ).to(device)
             elif method_type in ["gnmgazechannel", "gnmpersonchannel"]:
-                model = gnmchannel_model( 
+                model = gnmchannel_model(
+                    method=method_type,
                     context_size=config["context_size"],
                     len_traj_pred=config["len_traj_pred"],
                     encoding_size=config["encoding_size"],
                 ).to(device)
             else:
                 raise ValueError(f"Unknown method type for act_model: {method_type}")
-    
+
     # 确保模型不为空，以便为其创建优化器和调度器
     if model is None:
         raise ValueError("Model instance is None and no new model was created. Cannot create optimizer.")
+
+    if model_type == "act_model":
+        _initialize_lazy_modules(model, method_type, config, device)
 
     # 梯度裁剪
     if config["clipping"]:
@@ -492,7 +546,7 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
             )
         else:
             raise ValueError(f"Scheduler {config['scheduler']} not supported")
-        
+
         if config["warmup"] and config["warmup_epochs"] > 0:
             scheduler = GradualWarmupScheduler(
                 optimizer,
@@ -505,7 +559,7 @@ def create_model_and_optimizer(method_type, config, device, lr, model_type="act_
 
 def main(config):
     torch.set_num_threads(4)
-    
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
@@ -525,11 +579,11 @@ def main(config):
 
     print(f"\n--- Starting for method: {config['method']} ---")
 
-    if config["method"] in ["1phase", "1phaseplus", "gaze", "gazeplus"]:
+    if config["method"] in OBS_METHODS:
 
-        use_generated_attnmaps = False if config["method"] in ["1phase", "gaze"] else True
-        train_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "your_folder/data_splits/train/attnmap_used.pt"
-        test_gen_attnmaps_path = None if config ["method"] in ["1phase", "gaze"] else "your_folder/data_splits/test/attnmap_used.pt"
+        use_generated_attnmaps = config["method"] in ["1phaseplus", "gazeplus"]
+        train_gen_attnmaps_path = None if not use_generated_attnmaps else _split_artifact_path(config, "train", "attnmap_used.pt")
+        test_gen_attnmaps_path = None if not use_generated_attnmaps else _split_artifact_path(config, "test", "attnmap_used.pt")
 
         # Create datasets for obs_model training
         train_dataset_obs = ConcatDataset([
@@ -560,7 +614,7 @@ def main(config):
         ])
 
         # Determine the collate_fn for the action model based on its method type
-        if config["method"] in ["1phase","1phaseplus"]: # These use person_collate_fn
+        if config["method"] in ["1phase", "1phaseplus"]: # These use person_collate_fn
             obs_collate_fn = obs_person_collate_fn
         else: # Default for gaze or gazeplus or 2phase or plus
             obs_collate_fn = obs_base_collate_fn
@@ -589,16 +643,16 @@ def main(config):
         )
         train_loader_use = train_loader_obs
         test_loader_use = test_loader_obs
-        
+
     else:
-        if config["wg_origin"]=="GT":
+        if config["wg_origin"] == "GT":
             use_generated_labels = False
             train_gen_labels_path = None
             test_gen_labels_path = None
         else:
             use_generated_labels = True
-            train_gen_labels_path = f'/your_folder/data_splits/train/{config["wg_origin"]}.pt'
-            test_gen_labels_path = f'/your_folder/data_splits/test/{config["wg_origin"]}.pt'
+            train_gen_labels_path = _split_artifact_path(config, "train", f'{config["wg_origin"]}.pt')
+            test_gen_labels_path = _split_artifact_path(config, "test", f'{config["wg_origin"]}.pt')
 
         # Create datasets for act_model training
         train_dataset_act = ConcatDataset([
@@ -629,7 +683,7 @@ def main(config):
         ])
 
         # Determine the collate_fn for the action model based on its method type
-        if config["method"] in ["gnmpersonaux", "gnmpersonchannel", "personaux", "personchannel", "persontoken"]: # These use person_collate_fn
+        if config["method"] in PERSON_ACT_METHODS: # These use person_collate_fn
             act_collate_fn = act_person_collate_fn
         else: # Default for vint, cnnaux, gazeaux, gazechannel, gazetoken
             act_collate_fn = act_base_collate_fn
@@ -663,12 +717,12 @@ def main(config):
     # Generate Attention Map from stage0 or gazes/winners from stage1
     if config["ifgenerate"] == True:
 
-        if config ["method"] == "persontoken":
+        if config["method"] == "persontoken":
 
             act_model, _, _ = create_model_and_optimizer(
                 "persontoken", config, device, 0.0, model_type="act_model"
             ) # lr设为0表示不训练
-            
+
             #加载模型
             load_act_model_path = config["load_act_model_path"]
             if os.path.exists(load_act_model_path):
@@ -681,13 +735,13 @@ def main(config):
             # 生成raw
             generate_attnmap(act_model, train_loader_use, device, config["save_train_raw_path"])
             generate_attnmap(act_model, test_loader_use, device, config["save_test_raw_path"])
-            
+
         elif config["method"] in ["1phase", "1phaseplus"]:
 
             obs_model, _, _ = create_model_and_optimizer(
                 config["method"], config, device, 0.0, model_type="obs_model"
             ) # lr设为0表示不训练
-            
+
             #加载模型
             load_obs_model_path = config["load_obs_model_path"]
             if os.path.exists(load_obs_model_path):
@@ -700,13 +754,13 @@ def main(config):
             # 生成raw
             generate_1phase_winners(config["method"], obs_model, train_loader_use, device, config["save_train_raw_path"])
             generate_1phase_winners(config["method"], obs_model, test_loader_use, device, config["save_test_raw_path"])
-        
+
         elif config["method"] in ["gaze", "gazeplus"]:
 
             obs_model, _, _ = create_model_and_optimizer(
                 config["method"], config, device, 0.0, model_type="obs_model"
             ) # lr设为0表示不训练
-            
+
             #加载模型
             load_obs_model_path = config["load_obs_model_path"]
             if os.path.exists(load_obs_model_path):
@@ -723,13 +777,15 @@ def main(config):
     # else train models
     else:
         # Initialize models
-        if config["method"] in ["gaze", "gazeplus", "1phase", "1phaseplus"]:
+        if config["method"] in OBS_METHODS:
             obs_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["obs_lr"]), model_type="obs_model")
             act_model = None  # Only obs_model is primary
-            
+
             # 加载预训练模型用于评估
             if not config["iftrain"]:
-                model_path = f"/your_folder/data_splits/weights/best_{config['method']}.pt"
+                model_path = config.get("eval_model_path") or config.get("load_obs_model_path")
+                if not model_path:
+                    raise FileNotFoundError("Set eval_model_path or load_obs_model_path before running obs_model evaluation.")
                 if os.path.exists(model_path):
                     print(f"Loading pretrained obs_model from: {model_path}")
                     checkpoint = torch.load(model_path, map_location=device)
@@ -737,7 +793,7 @@ def main(config):
                     print("Pretrained obs_model loaded successfully.")
                 else:
                     raise FileNotFoundError(f"Pretrained model not found at {model_path}")
-            
+
             total_params = count_parameters(obs_model)
             print(f"Obs model total params: {total_params} ({total_params/1e6:.2f}M)")
             if config.get("use_wandb", False):
@@ -746,10 +802,12 @@ def main(config):
         else:
             act_model, optimizer, scheduler = create_model_and_optimizer(config["method"], config, device, float(config["act_lr"]), model_type="act_model")
             obs_model = None  # Only act_model is primary
-            
+
             # 加载预训练模型用于评估
             if not config["iftrain"]:
-                model_path = f"/your_folder/data_splits/weights/best_{config['method']}.pt"
+                model_path = config.get("eval_model_path") or config.get("load_act_model_path")
+                if not model_path:
+                    raise FileNotFoundError("Set eval_model_path or load_act_model_path before running act_model evaluation.")
                 if os.path.exists(model_path):
                     print(f"Loading pretrained act_model from: {model_path}")
                     checkpoint = torch.load(model_path, map_location=device)
@@ -757,7 +815,7 @@ def main(config):
                     print("Pretrained act_model loaded successfully.")
                 else:
                     raise FileNotFoundError(f"Pretrained model not found at {model_path}")
-                
+
             total_params = count_parameters(act_model)
             print(f"Act model total params: {total_params} ({total_params/1e6:.2f}M)")
             if config.get("use_wandb", False):
@@ -767,8 +825,8 @@ def main(config):
             train_method=config["method"],
             training_config=config,
             train_model=config["iftrain"],
-            obs_model=obs_model if config["method"] in ["1phase", "1phaseplus", "gaze", "gazeplus"] else None,
-            act_model=act_model if config["method"] not in ["1phase", "1phaseplus", "gaze", "gazeplus"] else None,
+            obs_model=obs_model if config["method"] in OBS_METHODS else None,
+            act_model=act_model if config["method"] not in OBS_METHODS else None,
             optimizer=optimizer, # Use the single optimizer
             scheduler=scheduler, # Use the single scheduler
             train_loader=train_loader_use,
@@ -787,35 +845,39 @@ def main(config):
         )
         print(f"--- {config['method']} Finished ---")
 
-        wandb.finish()
+        if config.get("use_wandb", False):
+            wandb.finish()
 
 
 if __name__ == "__main__":
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["run_folder"] = os.path.join(
-        "my_logs", config["project_name"], config["run_name"]
+        config.get("log_root", "logs"), config["project_name"], config["run_name"]
     )
-    os.makedirs(config["run_folder"])
+    os.makedirs(config["run_folder"], exist_ok=True)
 
     if config["use_wandb"]:
         wandb.login()
+        wandb_kwargs = {
+            "project": config["project_name"],
+            "settings": wandb.Settings(start_method="fork"),
+        }
+        if config.get("wandb_entity"):
+            wandb_kwargs["entity"] = config["wandb_entity"]
+
         if "load_run" in config:
             # 取 load_run 路径的最后一部分作为 run id，避免斜杠
             run_id = config["run_id"]
             wandb.init(
-                project=config["project_name"],
-                settings=wandb.Settings(start_method="fork"),
-                entity="polluxiaga-nanjing-university",
+                **wandb_kwargs,
                 resume="must",
                 id=run_id,
             )
             wandb.config.update(config, allow_val_change=True)
         else:
             wandb.init(
+                **wandb_kwargs,
                 mode="offline",
-                project=config["project_name"],
-                settings=wandb.Settings(start_method="fork"),
-                entity="polluxiaga-nanjing-university",
             )
             wandb.run.name = config["run_name"]
             wandb.config.update(config)

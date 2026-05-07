@@ -1,3 +1,6 @@
+"""Extract tracked pedestrian IDs from per-frame mask CSV files."""
+
+import argparse
 import os
 import pandas as pd
 import pickle
@@ -86,10 +89,10 @@ def extract_and_save_person_ids(root_folder):
 
 # --- How to use the script ---
 if __name__ == "__main__":
-    # IMPORTANT: Replace './your_root_folder' with the actual path to your target folder!
-    # Example for Windows: root_directory = 'C:\\Users\\YourUser\\YourProjectData'
-    # Example for macOS/Linux: root_directory = '/Users/YourUser/YourProjectData'
-    root_directory = '/your_folder/data' # This path is from your previous input.
+    parser = argparse.ArgumentParser(description="Generate person_ids.pkl for each trajectory folder.")
+    parser.add_argument("--root", default="data", help="Root data directory.")
+    args = parser.parse_args()
+    root_directory = args.root
 
     if not os.path.isdir(root_directory):
         print(f"Error: The specified root directory '{root_directory}' does not exist.")

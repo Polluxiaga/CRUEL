@@ -1,3 +1,6 @@
+"""Generate ground-truth selected-person IDs from human fixation points."""
+
+import argparse
 import os
 import pandas as pd
 import pickle
@@ -8,9 +11,9 @@ from collections import deque
 # --- Configuration ---
 # IMPORTANT: You MUST set your image dimensions here for correct pixel mapping.
 # These values determine how flattened mask data (1D column) maps back to 2D (y, x) coordinates.
-# If a 160x120 image was flattened, IMAGE_WIDTH should be 160, IMAGE_HEIGHT should be 120.
-IMAGE_WIDTH = 160  # Corrected example from your input
-IMAGE_HEIGHT = 120 # Corrected example from your input
+# If a 160x128 image was flattened, IMAGE_WIDTH should be 160, IMAGE_HEIGHT should be 128.
+IMAGE_WIDTH = 160
+IMAGE_HEIGHT = 128
 
 # Sliding window configuration
 # SLIDING_WINDOW_SIZE = 10 means: current frame + past 9 frames = 10 frames total.
@@ -94,7 +97,7 @@ def extract_selected_ids_based_on_fixations(root_folder):
                 continue
 
             csv_file_path = os.path.join(subdir, filename)
-            
+
             # This set will hold IDs selected based purely on pixel overlap in the current frame
             current_frame_pixel_selected_ids = set()
 
@@ -125,11 +128,11 @@ def extract_selected_ids_based_on_fixations(root_folder):
 
                 # Extract person IDs from the very first row (header row)
                 person_ids = mask_df.iloc[0, :].tolist()
-                
+
                 # Extract mask data: all rows from the second row onwards, all columns.
                 # This `masks_data` contains the flattened mask for each person.
                 masks_data = mask_df.iloc[1:, :].values
-                
+
                 # Calculate coordinates to check around the fixation point
                 coords_to_check = [] # This will store (y, x) coordinates for pixels
                 for dy, dx in neighbor_offsets:
@@ -176,10 +179,10 @@ def extract_selected_ids_based_on_fixations(root_folder):
                 final_selected_ids_for_frame = set(current_frame_pixel_selected_ids)
                 for past_ids_set in previous_frames_selected_ids_window:
                     final_selected_ids_for_frame.update(past_ids_set)
-                
+
                 # Convert to sorted list and append to the main results list for this subfolder
                 select_ids_for_subdir.append(sorted(list(final_selected_ids_for_frame)))
-                
+
                 print(f"    Final IDs (with window) for Frame {frame_idx}: {sorted(list(final_selected_ids_for_frame))}")
 
             except pd.errors.EmptyDataError:
@@ -217,10 +220,10 @@ def extract_selected_ids_based_on_fixations(root_folder):
 
 # --- How to use the script ---
 if __name__ == "__main__":
-    # IMPORTANT: Set your root directory here! This is the main folder containing your subfolders.
-    # Example for Windows: root_directory = 'C:\\Users\\YourUser\\MyProjectData'
-    # Example for macOS/Linux: root_directory = '/Users/YourUser/Documents/ExperimentData'
-    root_directory = '/your_folder/data' # <<< DOUBLE-CHECK AND CHANGE THIS PATH if needed!
+    parser = argparse.ArgumentParser(description="Generate select_ids.pkl from fixation.csv and mask CSV files.")
+    parser.add_argument("--root", default="data", help="Root data directory.")
+    args = parser.parse_args()
+    root_directory = args.root
 
     if not os.path.isdir(root_directory):
         print(f"Error: The specified root directory '{root_directory}' does not exist.")

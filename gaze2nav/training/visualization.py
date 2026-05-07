@@ -1,3 +1,5 @@
+"""Visualization helpers for trajectories, gaze points, and salient masks."""
+
 import os
 import numpy as np
 from PIL import Image
@@ -20,22 +22,23 @@ MAGENTA = np.array([1, 0, 1])
 
 def np2img(arr: np.ndarray) -> Image:
     """Convert numpy array to PIL Image.
-    
+
     Args:
         arr: numpy array of shape (C, H, W) or (H, W, C)
-        
+
     Returns:
         PIL Image of size VIZ_IMAGE_SIZE
     """
     # Check array shape
     if len(arr.shape) != 3:
         raise ValueError(f"Expected 3D array (C,H,W) or (H,W,C), got shape {arr.shape}")
-    
+
     # If array is in (C,H,W) format, transpose to (H,W,C)
     if arr.shape[0] == 3:  # Channels-first format
         arr = np.transpose(arr, (1, 2, 0))
-    
+
     # Convert to uint8 and create PIL Image
+    arr = np.clip(arr, 0.0, 1.0)
     img = Image.fromarray(np.uint8(255 * arr))
     img = img.resize(VIZ_IMAGE_SIZE)
     return img
@@ -103,10 +106,10 @@ def plot_trajs_and_points(
             color=traj_colors[i],  # Use the same color as the trajectory
             alpha=1.0,
         )
-    
+
     ax.set_aspect("equal", "box")
     # put the legend below the plot
-    if traj_labels is not None or point_labels is not None:
+    if traj_labels is not None:
         ax.legend(bbox_to_anchor=(0.0, -0.5), loc="upper left", ncol=2)
 
 
@@ -121,19 +124,19 @@ def compute_attention_map(attention_scores: np.ndarray, time_idx: int) -> np.nda
     """
     # 先在行方向上平均，得到每个token被关注的平均程度 [1, seq_len]
     mean_attention = attention_scores.mean(axis=0)
-    
+
     # 对整个序列的attention scores进行归一化
     mean_attention = (mean_attention - mean_attention.min()) / (mean_attention.max() - mean_attention.min() + 1e-8)
-    
+
     # 获取对应时间步的attention scores
     start_idx = time_idx * (FEATURE_SIZE[0] * FEATURE_SIZE[1])
     end_idx = (time_idx + 1) * (FEATURE_SIZE[0] * FEATURE_SIZE[1])
     frame_attention = mean_attention[start_idx:end_idx]  # [feature_len]
-    
+
     # 将一维attention weights重塑为二维特征图
     H, W = FEATURE_SIZE
     attention_map = frame_attention.reshape(H, W)
-    
+
     return attention_map
 
 
@@ -207,36 +210,36 @@ def action_draw(
                                   xytext=(0, 3),  # 3 points vertical offset
                                   textcoords="offset points",
                                   ha='center', va='bottom', fontsize=10)
-    
+
     # Rows 2 & 3: 6 Observation Image Attention Map Overlays
     num_frames = len(obs_imgs)
     for idx, img in enumerate(obs_imgs):
         if idx >= num_frames:
             break
-            
+
         row = 1 + idx // 3 # Now starts from row 2 (index 1)
         col = idx % 3
-        
+
         ax_img_overlay = fig.add_subplot(gs[row, col])
-        
+
         attention_map = compute_attention_map(attention_scores, idx)
-        
+
         obs_img_np = np.array(img)
         h, w = obs_img_np.shape[:2]
-        
+
         heatmap = cv2.resize(attention_map, (w, h))
         heatmap = np.uint8(255 * heatmap)
         heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
         heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
-        
+
         ax_img_overlay.imshow(heatmap_img)
         ax_img_overlay.set_title(f"Frame {idx+1} with Attention Map", fontsize=16)
         ax_img_overlay.axis('off')
 
     plt.tight_layout()
-    
+
     if save_path is not None:
         fig.savefig(save_path, bbox_inches="tight", dpi=300)
 
@@ -280,12 +283,12 @@ def action_visualize(
             save_folder, "visualize", mode, f"epoch{epoch}", "action_prediction"
         )
 
-    if not os.path.exists(visualize_path):
+    if visualize_path is not None and not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
-    
+
     for i in range(min(batch_size, num_images_log)):
         obs_imgs = []
         for j in range(batch_obs_images.shape[1]):
@@ -373,24 +376,24 @@ def gaze_draw(
     for idx, img in enumerate(obs_imgs):
         if idx >= num_frames:
             break
-            
+
         row = 1 + idx // 3
         col = idx % 3
-        
+
         ax_img_overlay = fig.add_subplot(gs[row, col])
-        
+
         # Convert image to numpy array and get dimensions
         obs_img_np = np.array(img)
         img_h, img_w = obs_img_np.shape[:2]
-        
+
         # Create attention heatmap
         if idx < len(attention_per_frame):
             # Reshape attention scores for the current frame to feature map size
             frame_attention = attention_per_frame[idx].reshape(h, w)
-            
+
             # Normalize attention scores to [0,1] range
             frame_attention = (frame_attention - frame_attention.min()) / (frame_attention.max() - frame_attention.min() + 1e-8)
-            
+
             # Resize feature map-sized attention map to image size
             heatmap = cv2.resize(frame_attention, (img_w, img_h))
             heatmap = np.uint8(255 * heatmap)
@@ -401,10 +404,10 @@ def gaze_draw(
 
         # Overlay heatmap on original image
         heatmap_img = cv2.addWeighted(obs_img_np, 0.6, heatmap, 0.4, 0)
-        
+
         # Display the overlay image
         ax_img_overlay.imshow(heatmap_img)
-        
+
         # Always draw GT fixation points on all frames
         ax_img_overlay.scatter(
             scaled_label_fixation[idx][0],
@@ -414,7 +417,7 @@ def gaze_draw(
             s=100,
             label='Ground Truth Fixation' if idx == 0 else ""
         )
-        
+
         # Only draw predicted fixation on the last frame
         if idx == num_frames - 1:  # Last frame
             ax_img_overlay.scatter(
@@ -426,12 +429,12 @@ def gaze_draw(
                 label='Predicted Fixation'
             )
             ax_img_overlay.legend()
-            
+
         ax_img_overlay.set_title(f"Frame {idx+1} with Attention", fontsize=16)
         ax_img_overlay.axis('off')
 
     plt.tight_layout()
-    
+
     if save_path is not None:
         fig.savefig(save_path, bbox_inches="tight", dpi=300)
 
@@ -460,18 +463,18 @@ def gaze_visualize(
             save_folder, "visualize", mode, f"epoch{epoch}", "gaze_prediction"
         )
 
-    if not os.path.exists(visualize_path):
+    if visualize_path is not None and not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
-    
+
     for i in range(min(batch_size, num_images_log)):
         obs_imgs = []
         for j in range(batch_obs_images.shape[1]):
             obs_imgs.append(np2img(batch_obs_images[i][j]))  # T * [C, H, W]
 
-        pred_fixation = batch_pred_fixation
+        pred_fixation = batch_pred_fixation[i:i + 1]
         label_fixation = batch_label_fixations[i]
         attention_score = attention_scores[i]
 
@@ -491,7 +494,7 @@ def gaze_visualize(
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
         wandb.log({f"{mode}_gaze_prediction": wandb_list}, commit=False)
-    
+
 
 def plot_confusion_bar(pred_select:np.array, label_select:np.array, ax:plt.Axes):
     """
@@ -565,15 +568,15 @@ def obsp_draw(
     for idx, img in enumerate(obs_imgs):
         if idx >= num_frames:
             break
-            
+
         row = 1 + idx // 3 # Now starts from row 2 (index 1)
         col = idx % 3
-        
+
         ax_img_overlay = fig.add_subplot(gs[row, col])
-        
+
         obs_img_np = np.array(img)
         h, w = obs_img_np.shape[:2]
-        
+
         masked_img_display = np.copy(obs_img_np)
 
         # Define a translucent color for the mask overlay
@@ -602,19 +605,19 @@ def obsp_draw(
 
                 masked_img_display = cv2.addWeighted(masked_img_display, 1.0, colored_mask, mask_alpha, 0)
                 # --- End of Mask Overlay Logic ---
-        
+
         ax_img_overlay.imshow(masked_img_display)
         ax_img_overlay.set_title(f"Frame {idx+1} with Select Winner Masks", fontsize=16)
         ax_img_overlay.axis('off')
 
     plt.tight_layout()
-    
+
     if save_path is not None:
         fig.savefig(save_path, bbox_inches="tight", dpi=300)
 
     if not display:
         plt.close(fig)
-    
+
 
 def obsp_visualize(
     batch_obs_images: np.ndarray,  # [B, T, 3, H, W]
@@ -635,12 +638,12 @@ def obsp_visualize(
             save_folder, "visualize", mode, f"epoch{epoch}", "obs_prediction"
         )
 
-    if not os.path.exists(visualize_path):
+    if visualize_path is not None and not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
     batch_size = batch_obs_images.shape[0]
     wandb_list = []
-    
+
     for i in range(min(batch_size, num_images_log)):
         obs_imgs = []
         winner_masks = []

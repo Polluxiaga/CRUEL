@@ -1,12 +1,15 @@
+"""Observation-side models for gaze prediction and salient-person selection."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
 from efficientnet_pytorch import EfficientNet
-from my_model.act_models import CustomTransformerEncoderLayer
+from gaze2nav.models.action_models import CustomTransformerEncoderLayer
 
 class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for flattened temporal-spatial tokens."""
     def __init__(self, d_model: int, max_seq_len: int = 50):
         super().__init__()
         self.d_model = d_model
@@ -27,6 +30,7 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1), :]
 
 class WinnerSelector(nn.Module):
+    """Predict which tracked pedestrians are salient from RGB and mask histories."""
     def __init__(
         self,
         context_size=5,
@@ -106,7 +110,7 @@ class WinnerSelector(nn.Module):
         # 展平空间维度并转置，然后重塑
         rgb_feats = rgb_feats.flatten(2).transpose(1, 2)  # (B*N, spatial_flatten_len, D) -> (B*N, 20, D)
         rgb_feats = rgb_feats.reshape(B, self.N * self.spatial_flatten_len, self.D)  # (B, N*20, D)
-        
+
         rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats)  # (B, N*20, D)
         rgb_out = self.rgb_context_transformer(rgb_feats_pe)  # (B, N*20, D)
         rgb_context_summary = rgb_out.mean(dim=1)  # (B, D)
@@ -114,14 +118,14 @@ class WinnerSelector(nn.Module):
         # Mask 路径
         flat_mask = mask_imgs.view(B * P * self.N, 1, mask_imgs.shape[3], mask_imgs.shape[4]).float()
         # mask_feats 现在会输出 (B*P*N, D, 4, 5)
-        mask_feats = self.mask_cnn_encoder(flat_mask) 
+        mask_feats = self.mask_cnn_encoder(flat_mask)
 
         # 展平空间维度并转置
         mask_feats = mask_feats.flatten(2).transpose(1, 2)  # (B*P*N, spatial_flatten_len, D) -> (B*P*N, 20, D)
-        
+
         # 重塑，现在可以直接用统一的 spatial_flatten_len
         mask_feats = mask_feats.reshape(B * P, self.N * self.spatial_flatten_len, self.D)  # (B*P, N*20, D)
-        
+
         mask_feats_pe = self.pos_encoder_n_frames(mask_feats)  # (B, N*20, D)
         mask_out = self.mask_sequence_transformer(mask_feats_pe)  # (B, N*20, D)
         person_mask_summary = mask_out.mean(dim=1).view(B, P, self.D)  # (B, P, D)
@@ -133,9 +137,10 @@ class WinnerSelector(nn.Module):
         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
 
         return logits
-    
+
 
 class WinnerSelectorPlus(nn.Module):
+    """Winner selector that also exposes RGB attention for alignment losses."""
     def __init__(
         self,
         context_size=5,
@@ -215,20 +220,20 @@ class WinnerSelectorPlus(nn.Module):
 
         # Flatten spatial dimensions and reshape for Transformer
         # (B*N, D, H_feat, W_feat) -> (B*N, D, H_feat*W_feat) -> (B*N, H_feat*W_feat, D)
-        rgb_feats_spatial = rgb_feats.flatten(2).transpose(1, 2)  
+        rgb_feats_spatial = rgb_feats.flatten(2).transpose(1, 2)
         # Reshape to (B, N * spatial_flatten_len, D) for the transformer
         rgb_feats_sequence = rgb_feats_spatial.reshape(B, self.N * self.spatial_flatten_len, self.D)
-        
+
         rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats_sequence)  # (B, N*20, D)
-        
+
         # Iterate through RGB Transformer layers and collect attention weights
         rgb_attn_weights_list = []
         rgb_out = rgb_feats_pe
         for layer in self.rgb_context_transformer_layers:
             # attn_weights from CustomTransformerEncoderLayer is (batch_size * num_heads, seq_len, seq_len)
             # batch_size is B, and seq_len is N * spatial_flatten_len
-            rgb_out, attn_weights = layer(rgb_out) 
-            
+            rgb_out, attn_weights = layer(rgb_out)
+
             # Reshape attn_weights to (B, num_heads, seq_len, seq_len) for easier averaging
             # `attn_weights.shape[0]` here is `B * num_heads`
             num_heads_current_layer = attn_weights.shape[0] // B
@@ -243,7 +248,7 @@ class WinnerSelectorPlus(nn.Module):
         else:
             print("No Transformer layers, return an empty/dummy tensor.")
             avg_rgb_attention_matrix = torch.empty(
-                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len, 
+                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len,
                 device=rgb_imgs.device
             )
 
@@ -252,16 +257,16 @@ class WinnerSelectorPlus(nn.Module):
 
         # attention scores from act_model are also flattened to (B, N*spatial_flatten_len) and softmaxed.
         normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1) # (B, N * spatial_flatten_len)
-        
+
         rgb_context_summary = rgb_out.mean(dim=1)  # (B, D)
 
         # Mask Path (no attention weights collected here as requested)
         flat_mask = mask_imgs.view(B * P * self.N, 1, mask_imgs.shape[3], mask_imgs.shape[4]).float()
-        mask_feats = self.mask_cnn_encoder(flat_mask) 
+        mask_feats = self.mask_cnn_encoder(flat_mask)
 
         mask_feats_spatial = mask_feats.flatten(2).transpose(1, 2)
         mask_feats_reshaped = mask_feats_spatial.reshape(B * P, self.N * self.spatial_flatten_len, self.D)
-        
+
         mask_feats_pe = self.pos_encoder_n_frames(mask_feats_reshaped)
 
         mask_out = self.mask_sequence_transformer(mask_feats_pe)  # (B, N*20, D)
@@ -274,9 +279,10 @@ class WinnerSelectorPlus(nn.Module):
         logits = logits.masked_fill(invalid, torch.finfo(logits.dtype).min)
 
         return logits, normalized_rgb_attention_sequence
-    
+
 
 class GazePredictorPlus(nn.Module):
+    """Predict the current fixation point from RGB history and previous gaze maps."""
     def __init__(
         self,
         image_width: int = 160,
@@ -293,7 +299,7 @@ class GazePredictorPlus(nn.Module):
         dropout_rate: float = 0.1,
     ):
         super().__init__()
-        
+
         self.image_width = image_width
         self.image_height = image_height
 
@@ -368,21 +374,21 @@ class GazePredictorPlus(nn.Module):
 
         # Flatten spatial dimensions and reshape for Transformer input
         # (B*N, D, 4, 5) -> (B*N, D, 20) -> (B*N, 20, D)
-        rgb_feats_spatial_flattened = rgb_feats_per_frame.flatten(2).transpose(1, 2)  
-        
+        rgb_feats_spatial_flattened = rgb_feats_per_frame.flatten(2).transpose(1, 2)
+
         # Reshape to (B, N * spatial_flatten_len, D) for the transformer
         rgb_feats_sequence_for_transformer = rgb_feats_spatial_flattened.reshape(
             B, self.N * self.spatial_flatten_len, self.D
         )
-        
+
         # Apply positional encoding
         rgb_feats_pe = self.pos_encoder_n_frames(rgb_feats_sequence_for_transformer)
-        
+
         # RGB Context Transformer layers
         rgb_attn_weights_list = []
         rgb_out = rgb_feats_pe
         for layer in self.rgb_context_transformer_layers:
-            rgb_out, attn_weights = layer(rgb_out) 
+            rgb_out, attn_weights = layer(rgb_out)
             num_heads_current_layer = attn_weights.shape[0] // B
             attn_weights_reshaped = attn_weights.view(
                 B, num_heads_current_layer, attn_weights.shape[1], attn_weights.shape[2]
@@ -391,19 +397,19 @@ class GazePredictorPlus(nn.Module):
 
         # Calculate average attention matrix across all layers and heads
         if rgb_attn_weights_list:
-            stacked_attn_weights = torch.stack(rgb_attn_weights_list, dim=0)  
-            avg_rgb_attention_matrix = torch.mean(stacked_attn_weights, dim=[0, 2])  
+            stacked_attn_weights = torch.stack(rgb_attn_weights_list, dim=0)
+            avg_rgb_attention_matrix = torch.mean(stacked_attn_weights, dim=[0, 2])
         else:
             print("No RGB Transformer layers, returning dummy attention.")
             avg_rgb_attention_matrix = torch.empty(
-                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len, 
+                B, self.N * self.spatial_flatten_len, self.N * self.spatial_flatten_len,
                 device=rgb_imgs.device
             )
 
         # Extract RGB Token Attention Map (for auxiliary loss)
-        rgb_token_saliency = avg_rgb_attention_matrix.sum(dim=1) 
-        normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1) 
-        
+        rgb_token_saliency = avg_rgb_attention_matrix.sum(dim=1)
+        normalized_rgb_attention_sequence = F.softmax(rgb_token_saliency, dim=1)
+
         # Reshape `rgb_out` back to include the N dimension explicitly for fusion.
         # (B, N * spatial_flatten_len, D) -> (B, N, spatial_flatten_len, D)
         rgb_out_per_frame = rgb_out.reshape(B, self.N, self.spatial_flatten_len, self.D)
@@ -421,13 +427,13 @@ class GazePredictorPlus(nn.Module):
         gaze_feats_reshaped_for_transformer = gaze_feats_spatial.reshape(
             B, self.context_size * self.spatial_flatten_len, self.D
         )
-        
+
         # 应用 positional encoding
         gaze_feats_pe = self.pos_encoder_n_frames(gaze_feats_reshaped_for_transformer)
 
         # Gaze sequence transformer
         gaze_out = self.gaze_sequence_transformer(gaze_feats_pe) # (B, context_size * 20, D)
-        
+
         # Reshape gaze_out to (B, context_size, spatial_flatten_len, D)
         gaze_out_per_frame = gaze_out.reshape(B, self.context_size, self.spatial_flatten_len, self.D)
         # Average across spatial tokens for each frame: (B, context_size, D)
@@ -447,20 +453,20 @@ class GazePredictorPlus(nn.Module):
 
         # Concatenate these features for the current prediction
         fused_features_for_current_frame = torch.cat(
-            [rgb_curr_frame_feat, gaze_prev_frame_feat], 
+            [rgb_curr_frame_feat, gaze_prev_frame_feat],
             dim=-1 # (B, 2D)
         )
-        
+
         # Predict raw coordinates for the current frame
         raw_fixations = self.fusion_predictor(fused_features_for_current_frame) # (B, 2)
-        
+
         # Apply sigmoid for normalization
         normalized_coords = torch.sigmoid(raw_fixations)
 
         # Scale to image pixel coordinates
         fixation_point_x = normalized_coords[:, 0] * (self.image_width - 1)
         fixation_point_y = normalized_coords[:, 1] * (self.image_height - 1)
-        
+
         # Combine into final fixation point (B, 2)
         fixation_point = torch.stack((fixation_point_x, fixation_point_y), dim=1) # (B, 2)
 

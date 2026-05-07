@@ -1,3 +1,9 @@
+"""Action-planning model definitions used by Gaze2Nav.
+
+The module contains ViNT/GNM-style planners and variants that inject gaze maps
+or salient-person masks as auxiliary channels or additional Transformer tokens.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,15 +33,15 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         # Add the positional encoding to the input based on the seq_len
         return x + self.pos_enc[:, :x.size(1), :]
-    
+
 
 class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
-    """ 自定义 TransformerEncoderLayer，返回 attn_weights """
+    """Transformer encoder layer that also returns self-attention weights."""
     def forward(self, src, src_mask=None, src_key_padding_mask=None):
         src2, attn_weights = self.self_attn(
             src, src, src,
-            attn_mask=src_mask, 
-            key_padding_mask=src_key_padding_mask, 
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
             need_weights=True
         )  # 强制输出注意力权重
         src = src + self.dropout1(src2)
@@ -47,11 +53,15 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
 
 
 class base_MultiLayerDecoder(nn.Module):
-    def __init__(self, embed_dim=512, seq_len=6, output_layers=[256, 128, 64], nhead=8, num_layers=8, ff_dim_factor=4):
+    """Transformer decoder head that maps token sequences to waypoint features."""
+
+    def __init__(self, embed_dim=512, seq_len=6, output_layers=None, nhead=8, num_layers=8, ff_dim_factor=4):
         super(base_MultiLayerDecoder, self).__init__()
-        
+        if output_layers is None:
+            output_layers = [256, 128, 64]
+
         self.positional_encoding = PositionalEncoding(embed_dim, max_seq_len=seq_len)
-        
+
         self.sa_layer = CustomTransformerEncoderLayer(
             d_model=embed_dim,
             nhead=nhead,
@@ -246,7 +256,7 @@ class gnm_model(nn.Module):
         # Observation MobileNet Encoder: handles (1 + context_size) RGB images
         # Each RGB image has 3 channels. So total input channels = (1 + context_size) * 3
         self.obs_mobilenet = MobileNetEncoder(num_images=1 + self.context_size).features
-        
+
         # After flattening, compress to obs_encoding_size
         self.compress_observation = nn.Sequential(
             nn.Linear(MobileNetEncoder().last_channel, self.obs_encoding_size),
@@ -263,7 +273,7 @@ class gnm_model(nn.Module):
             nn.Linear(256, 32),
             nn.ReLU(),
         )
-        
+
         # Only action predictor remains
         self.action_predictor = nn.Sequential(
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
@@ -292,7 +302,7 @@ class gnm_model(nn.Module):
         """
         # Process observation images
         obs_features = self.obs_mobilenet(obs_img)
-        
+
         if self.method in ["gnmgazeaux", "gnmpersonaux"]:
             # 生成 gaze_use_map
             gaze_use_map = self.gaze_conv(obs_features)  # [N, 1, H/32, W/32]
@@ -320,9 +330,9 @@ class gnm_model(nn.Module):
         action_pred[:, :, :2] = torch.cumsum(action_pred[:, :, :2], dim=1)
         if self.method in ["gnmgazeaux", "gnmpersonaux"]:
             return action_pred, gaze_use_map
-        else: 
+        else:
             return action_pred
-        
+
 
 class gnmchannel_model(nn.Module):
     def __init__(
@@ -351,7 +361,7 @@ class gnmchannel_model(nn.Module):
         # Observation MobileNet Encoder: handles (1 + context_size) RGB images
         # Each RGB image has 3 channels. So total input channels = (1 + context_size) * 3
         self.obs_mobilenet = MobileNetEncoder(num_images=1 + self.context_size, channels_per_image=4).features
-        
+
         # After flattening, compress to obs_encoding_size
         self.compress_observation = nn.Sequential(
             nn.Linear(MobileNetEncoder().last_channel, self.obs_encoding_size),
@@ -367,7 +377,7 @@ class gnmchannel_model(nn.Module):
             nn.Linear(256, 32),
             nn.ReLU(),
         )
-        
+
         # Only action predictor remains
         self.action_predictor = nn.Sequential(
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
@@ -410,12 +420,12 @@ class gnmchannel_model(nn.Module):
 
             combined_frame = torch.cat([rgb_frame, attn_frame], dim=1)
             combined_imput_frames.append(combined_frame)
-        
+
         # 合并所有时间步的特征
         obs_input = torch.cat(combined_imput_frames, dim=1)
 
         obs_features = self.obs_mobilenet(obs_input)
-        
+
         obs_features = self.flatten(obs_features)
         obs_features = self.compress_observation(obs_features)  # Output: (B, obs_encoding_size)
 
@@ -448,7 +458,7 @@ class vint_model(nn.Module):
         mha_num_attention_layers: Optional[int] = 2,
         mha_ff_dim_factor: Optional[int] = 4,
     ) -> None:
-        
+
         super(vint_model, self).__init__()
         self.context_size = context_size
         self.len_traj_pred = len_traj_pred
@@ -483,7 +493,7 @@ class vint_model(nn.Module):
                 sample_features = self.obs_encoder.extract_features(obs_img[0:1, 0:3])
                 H_feature = sample_features.shape[2]  # H/32
                 W_feature = sample_features.shape[3]  # W/32
-            
+
             self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
                 seq_len=(self.context_size+1) * H_feature * W_feature,
@@ -505,7 +515,7 @@ class vint_model(nn.Module):
             raw_obs_features = output  # [N, channel_num, H/32, W/32]
             raw_obs_features.retain_grad()
             raw_obs_features.register_hook(self._capture_obs_features_grad)
-            
+
             # 重塑为所需维度
             N = raw_obs_features.shape[0]
             batch_size = N // (self.context_size + 1)
@@ -524,27 +534,27 @@ class vint_model(nn.Module):
         # 2. 正常前向传播，获取最终的全局特征
         obs_features = self.obs_encoder.extract_features(obs_img)  # [N, 1280, H/32, W/32]
         N, C, H, W = obs_features.shape  # N = batch_size * (context_size+1)
-        
+
         # 继续原有的处理流程
         obs_encoding = obs_features.permute(0, 2, 3, 1)  # [N, H/32, W/32, 1280]
         obs_encoding = obs_encoding.reshape(N, H*W, C)  # [N, H/32*W/32, 1280]
 
         if self.obs_encoder._global_params.include_top:
             obs_encoding = self.obs_encoder._dropout(obs_encoding)
-        
+
         # 压缩到指定维度
         obs_encoding = self.compress_obs_enc(obs_encoding)  # [N, H/32*W/32, encoding_size]
-        
+
         # 重塑为序列形式
         obs_encoding = obs_encoding.reshape(
             (self.context_size+1, -1, H*W, self.encoding_size)
         )  # [context_size+1, batch_size, H/32*W/32, encoding_size]
-        
+
         # 转置为transformer期望的输入格式
         tokens = obs_encoding.permute(1, 0, 2, 3)  # [batch_size, context_size+1, H/32*W/32, encoding_size]
         batch_size = tokens.shape[0]
         tokens = tokens.reshape(batch_size, (self.context_size+1)*H*W, self.encoding_size)  # [batch_size, (context_size+1)*H/32*W/32, encoding_size]
-        
+
         # 3. Transformer解码器处理
         final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
         action_pred = self.action_predictor(final_repr)
@@ -562,7 +572,7 @@ class vint_model(nn.Module):
     def _capture_obs_features_grad(self, grad):
         # 保存obs_features的梯度 (在backward时触发)
         self._grad_obs_features = grad """
-    
+
 
 class channel_model(nn.Module):
     def __init__(
@@ -576,7 +586,7 @@ class channel_model(nn.Module):
         mha_num_attention_layers: Optional[int] = 2,
         mha_ff_dim_factor: Optional[int] = 4,
     ) -> None:
-        
+
         super(channel_model, self).__init__()
         self.method = method
         self.context_size = context_size
@@ -614,7 +624,7 @@ class channel_model(nn.Module):
                 sample_features = self.obs_encoder.extract_features(sample_input)
                 H_feature = sample_features.shape[2]  # H/32
                 W_feature = sample_features.shape[3]  # W/32
-            
+
             self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
                 seq_len=(self.context_size+1) * H_feature * W_feature,
@@ -648,20 +658,20 @@ class channel_model(nn.Module):
 
         if self.obs_encoder._global_params.include_top:
             obs_encoding = self.obs_encoder._dropout(obs_encoding)
-        
+
         # 压缩到指定维度
         obs_encoding = self.compress_obs_enc(obs_encoding)  # [N, H/32*W/32, encoding_size]
-        
+
         # 重塑为序列形式
         obs_encoding = obs_encoding.reshape(
             (self.context_size+1, -1, H*W, self.encoding_size)
         )  # [context_size+1, batch_size, H/32*W/32, encoding_size]
-        
+
         # 转置为transformer期望的输入格式
         tokens = obs_encoding.permute(1, 0, 2, 3)  # [batch_size, context_size+1, H/32*W/32, encoding_size]
         batch_size = tokens.shape[0]
         tokens = tokens.reshape(batch_size, (self.context_size+1)*H*W, self.encoding_size)  # [batch_size, (context_size+1)*H/32*W/32, encoding_size]
-        
+
         # 3. Transformer解码器处理
         final_repr, attention_scores = self.decoder(tokens)  # [batch_size, 32]
         action_pred = self.action_predictor(final_repr)
@@ -669,9 +679,9 @@ class channel_model(nn.Module):
             (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
         )
         action_pred = torch.cumsum(action_pred, dim=1)  # 将位置增量累计为 waypoints
-        
+
         return action_pred, attention_scores
-    
+
 
 class catoken_model(nn.Module):
     def __init__(
@@ -685,7 +695,7 @@ class catoken_model(nn.Module):
         mha_num_attention_layers: Optional[int] = 2,
         mha_ff_dim_factor: Optional[int] = 4,
     ) -> None:
-        
+
         super(catoken_model, self).__init__()
         self.method = method
         self.context_size = context_size
@@ -711,7 +721,7 @@ class catoken_model(nn.Module):
 
         self.rgb_modality_embedding = nn.Parameter(torch.randn(1, 1, encoding_size)* 0.02)
         self.attn_modality_embedding = nn.Parameter(torch.randn(1, 1, encoding_size)* 0.02)
-        
+
         self.decoder = None
         self.action_predictor = nn.Sequential(
             nn.Linear(32, self.len_traj_pred * self.num_action_params),
@@ -724,10 +734,10 @@ class catoken_model(nn.Module):
                 sample_features = self.rgb_encoder.extract_features(sample_rgb)
                 H_feature = sample_features.shape[2]  # H/32
                 W_feature = sample_features.shape[3]  # W/32
-            
+
             # Adjust sequence length to account for RGB spatial tokens + attention tokens
             total_seq_len = (self.context_size + 1) * H_feature * W_feature *2  # +1 for each attention token
-            
+
             self.decoder = base_MultiLayerDecoder(
                 embed_dim=self.encoding_size,
                 seq_len=total_seq_len,
@@ -744,7 +754,7 @@ class catoken_model(nn.Module):
         # Process RGB images
         rgb_features_list = []
         attn_features_list = []
-        
+
         for rgb, attn in zip(obs_img, attention):
             # Process RGB
             rgb_feat = self.rgb_encoder.extract_features(rgb)  # [batch_size, C, H/32, W/32]
@@ -782,5 +792,5 @@ class catoken_model(nn.Module):
             (action_pred.shape[0], self.len_traj_pred, self.num_action_params)
         )
         action_pred = torch.cumsum(action_pred, dim=1)  # 将位置增量累计为 waypoints
-        
+
         return action_pred, attention_scores

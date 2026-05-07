@@ -1,3 +1,9 @@
+"""Mask R-CNN detector wrapper used by the tracking/preprocessing pipeline.
+
+The wrapped model returns COCO class IDs, bounding boxes in ``xywh`` format, and
+optionally instance masks so DeepSORT can preserve per-person mask identities.
+"""
+
 import os
 import json
 import sys
@@ -17,7 +23,6 @@ if str(ROOT) not in sys.path:
 from network_files import MaskRCNN
 from backbone import resnet50_fpn_backbone
 
-# generate from ChatGPT
 coco91_to_coco80 = {
     1: 0,  # 人
     2: 1,  # 自行车
@@ -103,6 +108,7 @@ coco91_to_coco80 = {
 
 
 def create_model(num_classes, box_thresh=0.5):
+    """Create a Mask R-CNN with a ResNet50-FPN backbone."""
     backbone = resnet50_fpn_backbone()
     model = MaskRCNN(backbone,
                      num_classes=num_classes,
@@ -113,10 +119,13 @@ def create_model(num_classes, box_thresh=0.5):
 
 
 def xyxy_to_xywh(boxes_xyxy):
+    """Convert corner-format boxes to center-format boxes."""
     if isinstance(boxes_xyxy, torch.Tensor):
         boxes_xywh = boxes_xyxy.clone()
     elif isinstance(boxes_xyxy, np.ndarray):
         boxes_xywh = boxes_xyxy.copy()
+    else:
+        raise TypeError(f"Unsupported boxes type: {type(boxes_xyxy)}")
 
     boxes_xywh[:, 0] = (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2
     boxes_xywh[:, 1] = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2
@@ -127,10 +136,13 @@ def xyxy_to_xywh(boxes_xyxy):
 
 
 def xywh_to_xyxy(boxes_xywh):
+    """Convert center-format boxes to corner-format boxes."""
     if isinstance(boxes_xywh, torch.Tensor):
         boxes_xyxy = boxes_xywh.clone()
     elif isinstance(boxes_xywh, np.ndarray):
         boxes_xyxy = boxes_xywh.copy()
+    else:
+        raise TypeError(f"Unsupported boxes type: {type(boxes_xywh)}")
 
     boxes_xyxy[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2
     boxes_xyxy[:, 1] = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2
@@ -141,6 +153,8 @@ def xywh_to_xyxy(boxes_xywh):
 
 
 class Mask_RCNN:
+    """Inference-only Mask R-CNN facade with Gaze2Nav-friendly outputs."""
+
     def __init__(self, segment, num_classes, box_thresh, label_json_path='coco_classes.json', weight_path=None):
         self.segment = segment
         self.num_classes = num_classes  # 不包含背景
@@ -166,6 +180,7 @@ class Mask_RCNN:
         self.model.to(self.device)
 
     def __call__(self, img):
+        """Run detector on an RGB image and return boxes, scores, labels, and masks."""
         if (img > 1).any():
             img = (img / 255.).astype('float32')
         img = torch.from_numpy(img).permute(2, 0, 1)
@@ -175,7 +190,7 @@ class Mask_RCNN:
             outputs = self.model(img.to(self.device).unsqueeze(0))[0]
 
         # coco91 to 80
-        outputs['labels'] = torch.tensor([coco91_to_coco80[label.item()] for label in outputs['labels']],
+        outputs['labels'] = torch.tensor([coco91_to_coco80.get(label.item(), label.item()) for label in outputs['labels']],
                                          device=outputs['boxes'].device)
         if self.segment:
             return (xyxy_to_xywh(outputs['boxes']).detach().cpu().numpy(),

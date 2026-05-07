@@ -1,3 +1,6 @@
+"""Overlay all segmentation masks from each per-frame CSV for inspection."""
+
+import argparse
 import os
 import cv2
 import numpy as np
@@ -67,4 +70,9 @@ def visualize_csv_masks(folder_path, save_visualized=False):
 
 
 if __name__ == "__main__":
-    visualize_csv_masks("/your_folder/data_vis", save_visualized=True)
+    parser = argparse.ArgumentParser(description="Visualize segmentation mask CSVs over matching images.")
+    parser.add_argument("--folder", default="data_vis", help="Folder tree containing numbered CSV/JPG pairs.")
+    parser.add_argument("--display", action="store_true", help="Show images interactively instead of overwriting JPGs.")
+    args = parser.parse_args()
+
+    visualize_csv_masks(args.folder, save_visualized=not args.display)

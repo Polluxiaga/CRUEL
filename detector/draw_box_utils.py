@@ -1,3 +1,5 @@
+"""PIL drawing helpers for Mask R-CNN debugging visualizations."""
+
 from PIL.Image import Image, fromarray
 import PIL.ImageDraw as ImageDraw
 import PIL.ImageFont as ImageFont
@@ -76,12 +78,11 @@ def draw_text(draw,
 
 
 def draw_masks(image, masks, colors, thresh: float = 0.7, alpha: float = 0.5):
+    """Blend one or more instance masks into a PIL image."""
     np_image = np.array(image)
     masks = np.where(masks > thresh, True, False)
 
-    # colors = np.array(colors)
     img_to_draw = np.copy(np_image)
-    # TODO: There might be a way to vectorize this
     for mask, color in zip(masks, colors):
         img_to_draw[mask] = color
 

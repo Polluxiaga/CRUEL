@@ -1,3 +1,6 @@
+"""Create train/test trajectory splits for a GazeNav-style data folder."""
+
+import argparse
 import os
 import shutil
 import random
@@ -27,7 +30,7 @@ def find_traj_folders(data_dir: str):
             traj_folders.append(os.path.relpath(root, data_dir))  # 使用相对路径
     return traj_folders
 
-def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: float = 0.8):
+def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: float = 0.8, seed: int = 1):
     """
     从指定目录提取数据，分割成训练集和测试集，并保存到指定的目标文件夹中。
 
@@ -37,6 +40,8 @@ def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: 
     - split: 训练集/测试集的划分比例，默认80%训练集，20%测试集
     - data_splits_dir: 数据分割后保存的目标目录
     """
+    random.seed(seed)
+
     # 获取包含 'traj_data.pkl' 文件的文件夹名称
     folder_names = find_traj_folders(data_dir)
 
@@ -71,13 +76,14 @@ def process_data(data_dir: str, dataset_name: str, data_splits_dir: str, split: 
 
     print("Data processing complete!")
 
-# 设置固定路径
-data_dir = '/your_folder/data'
-dataset_name = 'data_splits'  # 自定义数据集名称
-data_splits_dir = '/you_folder'  # 目标目录
-split = 0.8  # 训练集和测试集的划分比例，默认80%训练，20%测试
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Create train/test trajectory split files.")
+    parser.add_argument("--data_dir", required=True, help="Root data directory containing trajectory folders.")
+    parser.add_argument("--dataset_name", default="data_splits", help="Name of the split directory to create.")
+    parser.add_argument("--data_splits_dir", required=True, help="Parent directory where split folders are written.")
+    parser.add_argument("--split", type=float, default=0.8, help="Train split ratio.")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed for reproducible splits.")
+    args = parser.parse_args()
 
-# 调用处理数据函数
-process_data(data_dir, dataset_name, data_splits_dir, split)
-
-print("Done")
+    process_data(args.data_dir, args.dataset_name, args.data_splits_dir, args.split, args.seed)
+    print("Done")

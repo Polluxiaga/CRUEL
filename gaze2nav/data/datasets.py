@@ -1,8 +1,13 @@
+"""Dataset loaders for Gaze2Nav training and artifact generation.
+
+``ObsDataset`` feeds gaze and salient-person prediction models. ``ActDataset``
+feeds motion planners with RGB history plus gaze maps or selected-person masks.
+"""
+
 import numpy as np
 import pandas as pd
 import os
 import pickle
-from typing import Tuple
 import tqdm
 import io
 import lmdb
@@ -11,14 +16,14 @@ from typing import Optional, Tuple, List
 import torch
 from torch.utils.data import Dataset
 
-from my_data.my_data_utils import (
+from gaze2nav.data.utils import (
     img_path_to_data,
     get_data_path,
 )
 
 
 class BaseDataset(Dataset):
-    # Class-level flag to track if caches are built
+    # Class-level flag avoids rebuilding the same LMDB cache repeatedly.
     _caches_built = {}
 
     def __init__(
@@ -48,7 +53,7 @@ class BaseDataset(Dataset):
         self.data_folder = data_folder
         self.data_split_folder = data_split_folder
         self.dataset_name = dataset_name
-        
+
         traj_names_file = os.path.join(data_split_folder, "traj_names.txt")
         with open(traj_names_file, "r") as f:
             file_lines = f.read()
@@ -61,14 +66,14 @@ class BaseDataset(Dataset):
         self.context_size = context_size
         self.obs_type = obs_type
 
-        # Caching dictionaries for trajectory-specific data
+        # Small in-memory caches for trajectory-local metadata.
         self.trajectory_cache = {}
         self.fixations_cache = {}
         self.person_ids_cache = {}
         self.select_ids_cache = {} # This will store the select_ids for winner_labels
-        
+
         self._load_index() # Load or build samples_index and goals_index
-        
+
         # Use cache path as unique key for tracking built status
         # Use two separate LMDBs for images and masks for clarity and modularity
         self._image_cache_path = os.path.join(
@@ -77,17 +82,17 @@ class BaseDataset(Dataset):
         )
         self._mask_cache_path = os.path.join( # New cache path for masks
             self.data_split_folder,
-            f"{self.dataset_name}_masks.lmdb",
+            f"{self.dataset_name}_masks_v2.lmdb",
         )
-        
+
         # Only build caches if not already built for this cache path
         if self._image_cache_path not in self._caches_built: # Check image cache build status
             self._build_caches()
             self._caches_built[self._image_cache_path] = True
-        
+
         # Always open the LMDB environment for both images and masks
         self._open_cache()
-    
+
 
     def _open_cache(self):
         """Open the LMDB environment(s) in read-only mode"""
@@ -107,7 +112,7 @@ class BaseDataset(Dataset):
         state["_image_cache"] = None
         state["_mask_cache"] = None # Ensure mask cache is also set to None
         return state
-    
+
     def __setstate__(self, state):
         """Handle unpickling"""
         self.__dict__ = state
@@ -148,7 +153,7 @@ class BaseDataset(Dataset):
             # load the index_to_data if it already exists (to save time)
             with open(index_to_data_path, "rb") as f:
                 self.samples_index, self.goals_index = pickle.load(f)
-        except:
+        except (FileNotFoundError, EOFError, pickle.UnpicklingError):
             # if the index_to_data file doesn't exist, create it
             self.samples_index, self.goals_index = self._build_index()
             with open(index_to_data_path, "wb") as f:
@@ -157,7 +162,7 @@ class BaseDataset(Dataset):
 
 
     def _build_caches(self, use_tqdm: bool = True):
-        """扩展缓存以包含所有需要的数据"""
+        """Build LMDB caches for RGB frames and per-person binary masks."""
         # Check if both caches exist, if so, return
         if os.path.exists(self._image_cache_path) and os.path.exists(self._mask_cache_path):
             return
@@ -186,7 +191,7 @@ class BaseDataset(Dataset):
 
                     # Prepare a dictionary to store all masks for the current frame
                     frame_masks = {}
-                    H, W = self.image_size
+                    W, H = self.image_size
                     dummy_mask_tensor = torch.zeros((H, W), dtype=torch.bool)
 
                     # Iterate through each person_id and load/process their mask
@@ -195,13 +200,26 @@ class BaseDataset(Dataset):
                         current_person_mask = dummy_mask_tensor # Start with dummy
 
                         try:
-                            df = pd.read_csv(mask_path)
+                            df = pd.read_csv(mask_path, header=None)
                             if not df.empty:
-                                col_name = str(person_id)
-                                if col_name in df.columns:
-                                    col = df[col_name].to_numpy(dtype=np.uint8)
-                                    padding_needed = H * W - col.size
-                                    col = np.pad(col, (0, padding_needed), 'constant', constant_values=0)
+                                csv_person_ids = df.iloc[0, :].tolist()
+                                csv_person_ids_as_str = [str(pid) for pid in csv_person_ids]
+                                person_id_str = str(person_id)
+
+                                if person_id in csv_person_ids:
+                                    col_idx = csv_person_ids.index(person_id)
+                                elif person_id_str in csv_person_ids_as_str:
+                                    col_idx = csv_person_ids_as_str.index(person_id_str)
+                                else:
+                                    col_idx = None
+
+                                if col_idx is not None and col_idx < df.shape[1]:
+                                    col = df.iloc[1:, col_idx].to_numpy(dtype=np.uint8)
+                                    expected_size = H * W
+                                    if col.size < expected_size:
+                                        col = np.pad(col, (0, expected_size - col.size), 'constant', constant_values=0)
+                                    elif col.size > expected_size:
+                                        col = col[:expected_size]
                                     current_person_mask = torch.from_numpy(col.reshape(H, W).astype(bool))
                         except pd.errors.EmptyDataError:
                             pass # File is empty, current_person_mask remains dummy
@@ -220,6 +238,7 @@ class BaseDataset(Dataset):
 
 
     def _load_image(self, trajectory_name, time):
+        """Load one cached RGB frame as a float tensor."""
         image_path = get_data_path(self.data_folder, trajectory_name, time)
 
         try:
@@ -237,6 +256,7 @@ class BaseDataset(Dataset):
 
 
     def _get_selected(self, trajectory_name, curr_time):
+        """Load ground-truth salient person IDs for a frame."""
         if trajectory_name not in self.select_ids_cache:
             with open(os.path.join(self.data_folder, trajectory_name, "select_ids.pkl"), "rb") as f:
                 select_ids_list = pickle.load(f)
@@ -258,19 +278,19 @@ class BaseDataset(Dataset):
             with open(os.path.join(self.data_folder, trajectory_name, "person_ids.pkl"), "rb") as f:
                 person_ids_list = pickle.load(f)
             self.person_ids_cache[trajectory_name] = person_ids_list
-        
+
         try:
             person_ids = self.person_ids_cache[trajectory_name][curr_time]
         except IndexError:
             # This should ideally not happen if _build_index handles short trajectories correctly
             print(f"ERROR: Person IDs index out of bounds for {trajectory_name} at time {curr_time}. Returning empty.")
             return [], [] # Returning empty lists for person_ids and labels
-        
+
         select_ids = self._get_selected(trajectory_name, curr_time)
         gt_labels = [1 if tid in select_ids else 0 for tid in person_ids]
 
         return person_ids, gt_labels
-    
+
 
     def _load_person_mask(self, trajectory_name, time, person_id):
         """
@@ -278,18 +298,18 @@ class BaseDataset(Dataset):
         """
         W, H = self.image_size
         dummy_mask = torch.zeros((H, W), dtype=torch.bool)
-        
+
         mask_key = f"{trajectory_name}_{time}_masks".encode()
-        
+
         try:
             with self._mask_cache.begin() as txn:
                 frame_masks_bytes = txn.get(mask_key)
                 if frame_masks_bytes is None:
                     # Key not found, indicating no masks or an issue during caching
                     return dummy_mask
-                
+
                 frame_masks_dict = pickle.loads(frame_masks_bytes)
-                
+
                 person_id_str = str(person_id)
                 if person_id_str in frame_masks_dict:
                     mask_bytes = frame_masks_dict[person_id_str]
@@ -315,18 +335,18 @@ class BaseDataset(Dataset):
             with open(os.path.join(self.data_folder, trajectory_name, "fixations.pkl"), "rb") as f:
                 fixations_data = pickle.load(f)
             self.fixations_cache[trajectory_name] = fixations_data
-            
+
         fixations_df = self.fixations_cache[trajectory_name]
 
         try:
-            fx, fy = 0, 0 
-            
+            fx, fy = 0, 0
+
             # Check current time's fixation
             if curr_time < len(fixations_df):
                 current_fx, current_fy = fixations_df.iloc[curr_time][0], fixations_df.iloc[curr_time][1]
                 if not (current_fx == 0 and current_fy == 0):
                     fx, fy = current_fx, current_fy
-            
+
             # If current fixation is (0,0), search for the nearest non-(0,0) by alternating
             if fx == 0 and fy == 0:
                 found_fixation = False
@@ -341,7 +361,7 @@ class BaseDataset(Dataset):
                             fx, fy = temp_fx_b, temp_fy_b
                             found_fixation = True
                             break
-                    
+
                     # Check forward
                     idx_f = curr_time + offset
                     if idx_f < len(fixations_df):
@@ -350,12 +370,12 @@ class BaseDataset(Dataset):
                             fx, fy = temp_fx_f, temp_fy_f
                             found_fixation = True
                             break
-                
+
                 # If still (0,0) after searching, return empty list
                 if not found_fixation:
                     print(f"No non-(0,0) fixations found for {trajectory_name} around time {curr_time}. Returning empty list.")
                     return []
-            
+
             return [(fx, fy)]
 
         except IndexError:
@@ -373,41 +393,42 @@ class BaseDataset(Dataset):
         """
         W, H = self.image_size
         dummy_attention_map = torch.zeros((1, H, W), dtype=torch.float32)
-        
+
         # Get fixation points from _load_fixations
         fixations = self._load_fixations(trajectory_name, curr_time)
         if not fixations:
             return dummy_attention_map
-        
+
         # Create empty attention map
         attention_map = torch.zeros((1, H, W), dtype=torch.float32)
-        
+
         # Generate Gaussian kernel
         sigma = 10.0  # Standard deviation in pixels
         x = torch.arange(0, W)
         y = torch.arange(0, H)
         y, x = torch.meshgrid(y, x, indexing='ij')
-        
+
         # Add Gaussian for each fixation point
         for fx, fy in fixations:
             # Convert fixation coordinates to integers
             fx = int(fx)
             fy = int(fy)
-            
+
             # Skip if fixation is outside image bounds
             if fx < 0 or fx >= W or fy < 0 or fy >= H:
                 continue
-                
+
             # Generate 2D Gaussian centered at fixation
             gaussian = torch.exp(-((x - fx)**2 + (y - fy)**2) / (2 * sigma**2))
             gaussian = gaussian / gaussian.max()  # Normalize to [0,1]
-            
+
             # Add to attention map
             attention_map[0] = torch.maximum(attention_map[0], gaussian)
-        
+
         return attention_map
 
     def _get_trajectory(self, trajectory_name):
+        """Load and cache trajectory positions for a trajectory."""
         if trajectory_name in self.trajectory_cache:
             return self.trajectory_cache[trajectory_name]
         else:
@@ -432,7 +453,7 @@ class BaseDataset(Dataset):
         actions = waypoints[1:]
 
         return actions
-    
+
 
     def __len__(self) -> int:
         return len(self.samples_index)
@@ -467,7 +488,7 @@ class ObsDataset(BaseDataset):
                 loaded_preds_list = torch.load(generated_attnmaps_path)
                 if not isinstance(loaded_preds_list, list) or not all(isinstance(p, torch.Tensor) for p in loaded_preds_list):
                      raise TypeError("Generated attnmaps file should contain a list of tensors.")
-                
+
                 # 存储为列表，通过索引访问
                 self._cached_generated_attnmaps = loaded_preds_list
                 print(f"Loaded {len(self._cached_generated_attnmaps)} generated attnmaps samples from disk.")
@@ -489,12 +510,17 @@ class ObsDataset(BaseDataset):
 
         # Load images
         obs_images = torch.cat([self._load_image(traj_name, t) for t in context])
-        fixations = torch.stack([torch.tensor(self._load_fixations(traj_name, t)[0], dtype=torch.float32) for t in context])
+        fixation_tensors = []
+        for t in context:
+            frame_fixations = self._load_fixations(traj_name, t)
+            fixation_xy = frame_fixations[0] if frame_fixations else (0, 0)
+            fixation_tensors.append(torch.tensor(fixation_xy, dtype=torch.float32))
+        fixations = torch.stack(fixation_tensors)
 
         # Load person IDs, labels and masks
         person_ids, gt_winner_labels_list = self._load_persons(traj_name, curr_time)
         gt_winner_labels_tensor = torch.tensor(gt_winner_labels_list, dtype=torch.bool)
-        
+
         # Handle empty person case
         if len(person_ids) == 0:
             W, H = self.image_size
@@ -511,7 +537,7 @@ class ObsDataset(BaseDataset):
 
             # Determine which winner_labels to return: GT or generated
             winner_labels_to_return = gt_winner_labels_tensor # ObsModel always trains on GT labels
-            
+
         # Get generated attention map if enabled, otherwise use a dummy/None
         # The WinnerSelector will consume this generated attention map as an input
         generated_attention_map_to_use = None
@@ -520,7 +546,7 @@ class ObsDataset(BaseDataset):
             if self._cached_generated_attnmaps is not None:
                 # 获取缓存中存储的注意力图 (N * spatial_flatten_len)
                 generated_attention_map_from_cache = self._cached_generated_attnmaps[i]
-                
+
                 if generated_attention_map_from_cache.ndim != 1:
                     print(f"Warning: Cached attention map for index {i} has unexpected dimensions: {generated_attention_map_from_cache.shape}. Expected 1D (N*spatial_flatten_len).")
 
@@ -543,7 +569,7 @@ class ObsDataset(BaseDataset):
             winner_labels_to_return, # GT winner labels
             torch.tensor(i, dtype=torch.long), # Original dataset index
         )
-    
+
 
 class ActDataset(BaseDataset):
 
@@ -568,7 +594,7 @@ class ActDataset(BaseDataset):
         self._cached_generated_winner_labels = None
         self._cached_generated_gaze_maps_individual = None
 
-        self.generated_type = None  # winner_labels or gaze_maps
+        self.generated_labels_type = None  # winner_labels or gaze_maps
 
         # 尝试从磁盘加载生成标签，如果 use_generated_labels 为 True 且提供了路径
         if self.use_generated_labels and generated_labels_path and os.path.exists(generated_labels_path):
@@ -583,7 +609,7 @@ class ActDataset(BaseDataset):
                     self._cached_generated_winner_labels = loaded_data
                     self.generated_labels_type = "winner_labels"
                     print(f"Loaded {len(self._cached_generated_winner_labels)} generated winner label samples from disk.")
-                    
+
                 elif "gaze" in generated_labels_path:
                     # 加载的是 gaze_maps
                     if not isinstance(loaded_data, dict) or not all(isinstance(k, tuple) and isinstance(v, torch.Tensor) for k, v in loaded_data.items()):
@@ -606,7 +632,7 @@ class ActDataset(BaseDataset):
         elif self.use_generated_labels and not generated_labels_path:
              print("Warning: use_generated_labels is True but no generated_labels_path provided.")
              self.use_generated_labels = False
-    
+
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
         traj_name, curr_time = self.samples_index[i]
@@ -624,13 +650,13 @@ class ActDataset(BaseDataset):
                     # 从缓存的字典中获取单个预测的 gaze map
                     key = (traj_name, t)
                     predicted_gaze_map_for_frame = self._cached_generated_gaze_maps_individual.get(key)
-                    
+
                     if predicted_gaze_map_for_frame is not None:
                         extracted_gaze_maps_list.append(predicted_gaze_map_for_frame.unsqueeze(0)) # 确保形状是 (1, H, W)
                     else:
                         print(f"ActDataset Warning: Individual predicted gaze map for {key} not found in cache. Using GT gaze map.")
                         extracted_gaze_maps_list.append(self._load_gazemaps(traj_name, t))
-                
+
                 # 将所有获取到的 gaze maps 拼接起来形成上下文序列
                 gaze_maps_to_return = torch.cat(extracted_gaze_maps_list, dim=0) # 结果形状 (context_size + 1, H, W)
             else:
@@ -643,7 +669,7 @@ class ActDataset(BaseDataset):
         # Load person IDs, labels and masks
         person_ids, gt_winner_labels_list = self._load_persons(traj_name, curr_time)
         gt_winner_labels_tensor = torch.tensor(gt_winner_labels_list, dtype=torch.bool)
-        
+
         # Handle empty person case
         if len(person_ids) == 0:
             W, H = self.image_size
@@ -664,7 +690,7 @@ class ActDataset(BaseDataset):
                 if self.use_generated_labels and self._cached_generated_winner_labels is not None:
                     # 获取缓存中存储的原始未填充预测标签 (P_actual,)
                     generated_labels_from_cache = self._cached_generated_winner_labels[i]
-                
+
                     # 检查加载的预测标签长度是否与当前样本的实际人数匹配
                     if generated_labels_from_cache.shape[0] != len(person_ids):
                         print(f"Warning: Generated labels shape mismatch for index {i}. Expected {len(person_ids)}, got {generated_labels_from_cache.shape[0]}. Using dummy labels.")
@@ -687,7 +713,7 @@ class ActDataset(BaseDataset):
         # Compute actions
         actions = self._compute_actions(curr_traj_data, curr_time)
 
-        
+
         return (
             torch.as_tensor(obs_images, dtype=torch.float32),
             torch.as_tensor(gaze_maps_to_return, dtype=torch.float32),

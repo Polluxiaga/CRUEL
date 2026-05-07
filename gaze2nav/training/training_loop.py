@@ -1,9 +1,11 @@
+"""Shared training/evaluation loop and checkpoint utilities."""
+
 import wandb
 import os
-from typing import Optional, Dict 
+from typing import Optional, Dict
 from prettytable import PrettyTable
 
-from my_training.my_train_utils import *
+from gaze2nav.training import training_utils
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -18,7 +20,7 @@ def load_model(model: nn.Module, checkpoint: Dict) -> None:
     """
     if "model_state_dict" not in checkpoint:
         raise ValueError("Checkpoint dictionary must contain 'model_state_dict' key.")
-    
+
     # Load the state_dict, allowing for partial matches (strict=False)
     # This is helpful if model architecture changes slightly or if loading from DataParallel
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -94,17 +96,17 @@ def train_eval_loop(
         # Use a specific path for act_model best checkpoint
         best_model_path = os.path.join(run_folder, "best_act_model.pth")
         latest_path = os.path.join(run_folder, "latest_act.pth")
-    
+
     if primary_model is None:
         raise ValueError(f"Primary model is None for train_method: {train_method}")
-    
+
     primary_model = primary_model.to(device)
 
     if training_config["method"] not in ["1phase", "1phaseplus"]:
         best_test_loss = float('inf')  # 对于普通的loss，初始化为正无穷
     else:
         best_test_loss = float('-inf')  # 对于AUC-PR指标，初始化为负无穷
-    
+
     best_epoch = 0
     epochs_without_improvement = 0
 
@@ -112,13 +114,13 @@ def train_eval_loop(
     for epoch in range(current_epoch, epochs):
         if train_model:
             # Get the training function dynamically based on train_method
-            train_func = globals().get(f"{train_method}_train")
+            train_func = getattr(training_utils, f"{train_method}_train", None)
             if train_func is None:
                 raise ValueError(f"Unknown train_method: {train_method}")
-                
+
             # Determine which model to use
             model = obs_model if train_method in ["gaze", "gazeplus", "1phase", "1phaseplus"] else act_model
-                
+
             # Call the training function
             train_func(
                 model=model,
@@ -138,13 +140,13 @@ def train_eval_loop(
         # Evaluation
         test_loss = None
         # Get the evaluation function dynamically based on train_method
-        eval_func = globals().get(f"{train_method}_evaluate")
+        eval_func = getattr(training_utils, f"{train_method}_evaluate", None)
         if eval_func is None:
             raise ValueError(f"Unknown evaluation method for {train_method}")
-        
+
         # Determine which model to use for evaluation
         model = obs_model if train_method in ["gaze", "gazeplus", "1phase", "1phaseplus"] else act_model
-        
+
         # Call the evaluation function
         test_loss = eval_func(
             model=model,
@@ -220,10 +222,11 @@ def train_eval_loop(
                 scheduler.step(test_loss)
             else:
                 scheduler.step()
-        wandb.log({
-            "test_loss": test_loss,
-            "lr": optimizer.param_groups[0]["lr"],
-        }, commit=False)
+        if use_wandb:
+            wandb.log({
+                "test_loss": test_loss,
+                "lr": optimizer.param_groups[0]["lr"],
+            }, commit=False)
 
         # Save latest checkpoint for this specific training run
         checkpoint = {
@@ -236,13 +239,14 @@ def train_eval_loop(
         }
         torch.save(checkpoint, latest_path)
         # Save epoch-numbered checkpoint (optional, but good for tracking)
-        torch.save(checkpoint, os.path.join(run_folder, f"{train_method}_epoch_{epoch}.pth")) 
+        torch.save(checkpoint, os.path.join(run_folder, f"{train_method}_epoch_{epoch}.pth"))
 
         # Clear GPU cache after each epoch
         torch.cuda.empty_cache()
 
     # Final log commit (if any pending) - although previous logs were committed per epoch
-    wandb.log({}, commit=True) # Ensure final commit if something was batched or missed
+    if use_wandb:
+        wandb.log({}, commit=True) # Ensure final commit if something was batched or missed
     print("Training loop finished for method:", train_method)
     print()
 
